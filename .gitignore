@@ -1,0 +1,25 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Environment files
+.env
+
+# Database files
+*.db
+*.db-journal
+
+# Uploads except .gitkeep
+uploads/*
+!uploads/.gitkeep
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.DS_Store
+Thumbs.db
