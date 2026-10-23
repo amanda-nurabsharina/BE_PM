@@ -87,6 +87,57 @@ type SettingsUpdateRequest struct {
 	AvatarURL         string  `json:"avatar_url"`
 }
 
+type ChangePasswordRequest struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+type UserCreateRequest struct {
+	Name         string   `json:"name"`
+	Email        string   `json:"email"`
+	Password     string   `json:"password"`
+	Role         string   `json:"role"`
+	AvatarURL    string   `json:"avatar_url"`
+	AllowedMenus []string `json:"allowed_menus"`
+}
+
+type UserUpdateRequest struct {
+	Name         string   `json:"name"`
+	Email        string   `json:"email"`
+	Password     string   `json:"password"`
+	Role         string   `json:"role"`
+	AvatarURL    string   `json:"avatar_url"`
+	AllowedMenus []string `json:"allowed_menus"`
+}
+
+type UserDetailResponse struct {
+	ID           uint     `json:"id"`
+	Email        string   `json:"email"`
+	Name         string   `json:"name"`
+	AvatarURL    string   `json:"avatar_url"`
+	Role         string   `json:"role"`
+	RoleName     string   `json:"role_name"`
+	AllowedMenus []string `json:"allowed_menus"`
+	OwnerID      *uint    `json:"owner_id"`
+	CreatedAt    string   `json:"created_at"`
+}
+
+type RoleRequest struct {
+	Code        string   `json:"code"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Menus       []string `json:"menus"`
+}
+
+type RoleResponse struct {
+	ID          uint     `json:"id"`
+	Code        string   `json:"code"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Menus       []string `json:"menus"`
+	IsSystem    bool     `json:"is_system"`
+}
+
 // Dashboard DTO
 type DashboardResponse struct {
 	EstimatedTotalValue int64       `json:"estimated_total_value"`

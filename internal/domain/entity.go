@@ -23,10 +23,24 @@ type User struct {
 	BankName          string         `gorm:"size:100" json:"bank_name"`
 	BankAccountNumber string         `gorm:"size:100" json:"bank_account_number"`
 	BankAccountHolder string         `gorm:"size:150" json:"bank_account_holder"`
-	Role              string         `gorm:"size:50;default:'CREATOR_OWNER'" json:"role"`
+	Role              string         `gorm:"size:50;default:'SUPER_ADMIN'" json:"role"`
+	AllowedMenus      string         `gorm:"type:text" json:"allowed_menus"` // Comma-separated: "beranda,tugas,laporan,invoice,keuangan,pengaturan"
+	OwnerID           *uint          `gorm:"index" json:"owner_id"`         // Pointer to studio owner user ID
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
 	DeletedAt         gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// Role represents system role and its permitted menu slugs
+type Role struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Code        string    `gorm:"size:50;uniqueIndex;not null" json:"code"`
+	Name        string    `gorm:"size:100;not null" json:"name"`
+	Description string    `gorm:"size:255" json:"description"`
+	Menus       string    `gorm:"type:text;not null" json:"menus"` // "beranda,tugas,laporan,invoice,keuangan,pengaturan"
+	IsSystem    bool      `gorm:"default:false" json:"is_system"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Task represents Endorse, Barter, or Internal Studio Task

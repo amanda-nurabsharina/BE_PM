@@ -19,8 +19,20 @@ type Repository interface {
 	// User / Settings
 	GetUserByEmail(email string) (*domain.User, error)
 	GetUserByID(id uint) (*domain.User, error)
+	CreateUser(user *domain.User) error
 	UpdateUser(user *domain.User) error
+	DeleteUser(userID uint) error
+	GetUsers(ownerID uint) ([]domain.User, error)
 	GetQuickUsers() ([]domain.User, error)
+	UpdatePassword(userID uint, newHash string) error
+
+	// Roles
+	GetRoles() ([]domain.Role, error)
+	GetRoleByCode(code string) (*domain.Role, error)
+	GetRoleByID(id uint) (*domain.Role, error)
+	CreateRole(role *domain.Role) error
+	UpdateRole(role *domain.Role) error
+	DeleteRole(id uint) error
 
 	// Tasks
 	GetTasks(userID uint, month, year int, taskType, status string, page, limit int) ([]domain.Task, int64, error)
@@ -67,6 +79,7 @@ func (r *gormRepository) DB() *gorm.DB {
 func (r *gormRepository) AutoMigrate() error {
 	return r.db.AutoMigrate(
 		&domain.User{},
+		&domain.Role{},
 		&domain.Task{},
 		&domain.ChecklistItem{},
 		&domain.Invoice{},
@@ -90,14 +103,69 @@ func (r *gormRepository) GetUserByID(id uint) (*domain.User, error) {
 	return &user, err
 }
 
+func (r *gormRepository) CreateUser(user *domain.User) error {
+	return r.db.Create(user).Error
+}
+
 func (r *gormRepository) UpdateUser(user *domain.User) error {
 	return r.db.Save(user).Error
 }
 
+func (r *gormRepository) DeleteUser(userID uint) error {
+	return r.db.Delete(&domain.User{}, userID).Error
+}
+
+func (r *gormRepository) GetUsers(ownerID uint) ([]domain.User, error) {
+	var users []domain.User
+	err := r.db.Where("id = ? OR owner_id = ?", ownerID, ownerID).Order("id asc").Find(&users).Error
+	return users, err
+}
+
 func (r *gormRepository) GetQuickUsers() ([]domain.User, error) {
 	var users []domain.User
-	err := r.db.Select("id, name, email, company, avatar_url, role").Find(&users).Error
+	err := r.db.Select("id, name, email, company, avatar_url, role, allowed_menus").Find(&users).Error
 	return users, err
+}
+
+func (r *gormRepository) UpdatePassword(userID uint, newHash string) error {
+	return r.db.Model(&domain.User{}).Where("id = ?", userID).Update("password_hash", newHash).Error
+}
+
+// Role methods
+func (r *gormRepository) GetRoles() ([]domain.Role, error) {
+	var roles []domain.Role
+	err := r.db.Order("id asc").Find(&roles).Error
+	return roles, err
+}
+
+func (r *gormRepository) GetRoleByCode(code string) (*domain.Role, error) {
+	var role domain.Role
+	err := r.db.Where("code = ?", code).First(&role).Error
+	if err != nil {
+		return nil, err
+	}
+	return &role, nil
+}
+
+func (r *gormRepository) GetRoleByID(id uint) (*domain.Role, error) {
+	var role domain.Role
+	err := r.db.First(&role, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &role, nil
+}
+
+func (r *gormRepository) CreateRole(role *domain.Role) error {
+	return r.db.Create(role).Error
+}
+
+func (r *gormRepository) UpdateRole(role *domain.Role) error {
+	return r.db.Save(role).Error
+}
+
+func (r *gormRepository) DeleteRole(id uint) error {
+	return r.db.Where("id = ? AND is_system = false", id).Delete(&domain.Role{}).Error
 }
 
 // Tasks methods
@@ -406,8 +474,59 @@ func (r *gormRepository) GetAvailableMonths(userID uint) ([]map[string]interface
 	return result, nil
 }
 
-// SeedInitialData sets up Reza Winata demo user and all initial mock records matching SRS and mockups
+// SeedInitialData sets up roles, Reza Winata demo super admin user and all initial mock records matching SRS and mockups
 func (r *gormRepository) SeedInitialData() error {
+	// 1. Seed Default System Roles
+	defaultRoles := []domain.Role{
+		{
+			Code:        "SUPER_ADMIN",
+			Name:        "Super Admin",
+			Description: "Akses penuh ke seluruh modul sistem dan pengelolaan pengguna/role",
+			Menus:       "beranda,tugas,laporan,invoice,keuangan,pengaturan",
+			IsSystem:    true,
+		},
+		{
+			Code:        "ADMIN",
+			Name:        "Admin Studio",
+			Description: "Pengelolaan operasional tugas, invoice, kas, dan laporan",
+			Menus:       "beranda,tugas,laporan,invoice,keuangan",
+			IsSystem:    true,
+		},
+		{
+			Code:        "FINANCE",
+			Name:        "Finance / Keuangan",
+			Description: "Fokus pengelolaan invoice penagihan dan pencatatan kas",
+			Menus:       "beranda,invoice,keuangan,laporan",
+			IsSystem:    false,
+		},
+		{
+			Code:        "STAFF",
+			Name:        "Staff Kreatif",
+			Description: "Fokus eksekusi tugas, checklist deliverable, dan beranda",
+			Menus:       "beranda,tugas",
+			IsSystem:    false,
+		},
+		{
+			Code:        "VIEWER",
+			Name:        "Pengamat / Viewer",
+			Description: "Akses pemantauan statistik beranda dan rekap laporan",
+			Menus:       "beranda,laporan",
+			IsSystem:    false,
+		},
+	}
+	for _, dr := range defaultRoles {
+		var existing domain.Role
+		if err := r.db.Where("code = ?", dr.Code).First(&existing).Error; err != nil {
+			r.db.Create(&dr)
+		}
+	}
+
+	// 2. Synchronize existing users: ensure initial user is SUPER_ADMIN
+	r.db.Model(&domain.User{}).Where("role = ? OR email = ?", "CREATOR_OWNER", "reza@studio.id").Updates(map[string]interface{}{
+		"role":          "SUPER_ADMIN",
+		"allowed_menus": "beranda,tugas,laporan,invoice,keuangan,pengaturan",
+	})
+
 	var count int64
 	r.db.Model(&domain.User{}).Count(&count)
 	if count > 0 {
@@ -429,7 +548,8 @@ func (r *gormRepository) SeedInitialData() error {
 		BankName:          "Bank Central Asia (BCA)",
 		BankAccountNumber: "8830192831",
 		BankAccountHolder: "Reza Winata",
-		Role:              "CREATOR_OWNER",
+		Role:              "SUPER_ADMIN",
+		AllowedMenus:      "beranda,tugas,laporan,invoice,keuangan,pengaturan",
 	}
 
 	if err := r.db.Create(&user).Error; err != nil {

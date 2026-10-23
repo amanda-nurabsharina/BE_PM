@@ -130,9 +130,22 @@ func main() {
 	// Reports
 	creator.Get("/reports", reportHandler.GetReports)
 
-	// Settings
+	// Settings & Security
 	creator.Get("/settings", settingHandler.GetSettings)
 	creator.Put("/settings", settingHandler.UpdateSettings)
+	creator.Put("/change-password", settingHandler.ChangePassword)
+
+	// User Management (Super Admin)
+	creator.Get("/users", settingHandler.GetUsers)
+	creator.Post("/users", settingHandler.CreateUser)
+	creator.Put("/users/:id", settingHandler.UpdateUser)
+	creator.Delete("/users/:id", settingHandler.DeleteUser)
+
+	// Role Management
+	creator.Get("/roles", settingHandler.GetRoles)
+	creator.Post("/roles", settingHandler.CreateRole)
+	creator.Put("/roles/:id", settingHandler.UpdateRole)
+	creator.Delete("/roles/:id", settingHandler.DeleteRole)
 
 	// Audit Logs (Immutable Query Only)
 	creator.Get("/audit-logs", auditHandler.GetAuditLogs)

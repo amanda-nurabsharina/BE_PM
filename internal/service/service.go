@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"be-pm/config"
@@ -21,6 +22,7 @@ type Service interface {
 	Login(req dto.LoginRequest) (*dto.LoginResponse, error)
 	QuickLogin(email string) (*dto.LoginResponse, error)
 	GetQuickUsers() ([]domain.User, error)
+	ChangePassword(userID uint, req dto.ChangePasswordRequest) error
 
 	// Dashboard
 	GetDashboard(userID uint) (*dto.DashboardResponse, error)
@@ -53,6 +55,18 @@ type Service interface {
 	GetSettings(userID uint) (*domain.User, error)
 	UpdateSettings(userID uint, req dto.SettingsUpdateRequest) (*domain.User, error)
 
+	// User Management (Super Admin only)
+	GetUsers(requesterID uint) ([]dto.UserDetailResponse, error)
+	CreateUser(requesterID uint, req dto.UserCreateRequest) (*dto.UserDetailResponse, error)
+	UpdateUser(requesterID uint, targetUserID uint, req dto.UserUpdateRequest) (*dto.UserDetailResponse, error)
+	DeleteUser(requesterID uint, targetUserID uint) error
+
+	// Role Management
+	GetRoles() ([]dto.RoleResponse, error)
+	CreateRole(requesterID uint, req dto.RoleRequest) (*dto.RoleResponse, error)
+	UpdateRole(requesterID uint, id uint, req dto.RoleRequest) (*dto.RoleResponse, error)
+	DeleteRole(requesterID uint, id uint) error
+
 	// Audit Logs
 	GetAuditLogs(userID uint, module, search string, page, limit int) (map[string]interface{}, error)
 
@@ -67,6 +81,57 @@ type serviceImpl struct {
 
 func NewService(repo repository.Repository, cfg *config.Config) Service {
 	return &serviceImpl{repo: repo, cfg: cfg}
+}
+
+func (s *serviceImpl) getOwnerID(userID uint) uint {
+	user, err := s.repo.GetUserByID(userID)
+	if err == nil && user != nil && user.OwnerID != nil && *user.OwnerID > 0 {
+		return *user.OwnerID
+	}
+	return userID
+}
+
+func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
+	var menuList []string
+	if user.Role == "SUPER_ADMIN" {
+		menuList = []string{"beranda", "tugas", "laporan", "invoice", "keuangan", "pengaturan"}
+	} else if user.AllowedMenus != "" {
+		for _, m := range strings.Split(user.AllowedMenus, ",") {
+			if t := strings.TrimSpace(m); t != "" {
+				menuList = append(menuList, t)
+			}
+		}
+	} else {
+		if roleObj, err := s.repo.GetRoleByCode(user.Role); err == nil && roleObj != nil && roleObj.Menus != "" {
+			for _, m := range strings.Split(roleObj.Menus, ",") {
+				if t := strings.TrimSpace(m); t != "" {
+					menuList = append(menuList, t)
+				}
+			}
+		}
+	}
+	if len(menuList) == 0 {
+		menuList = []string{"beranda"}
+	}
+
+	roleName := user.Role
+	if user.Role == "SUPER_ADMIN" {
+		roleName = "Super Admin"
+	} else if r, err := s.repo.GetRoleByCode(user.Role); err == nil && r != nil {
+		roleName = r.Name
+	}
+
+	return dto.UserDetailResponse{
+		ID:           user.ID,
+		Email:        user.Email,
+		Name:         user.Name,
+		AvatarURL:    user.AvatarURL,
+		Role:         user.Role,
+		RoleName:     roleName,
+		AllowedMenus: menuList,
+		OwnerID:      user.OwnerID,
+		CreatedAt:    user.CreatedAt.Format("2006-01-02 15:04"),
+	}
 }
 
 // Auth
@@ -89,7 +154,7 @@ func (s *serviceImpl) Login(req dto.LoginRequest) (*dto.LoginResponse, error) {
 		return nil, err
 	}
 
-	return &dto.LoginResponse{Token: token, User: user}, nil
+	return &dto.LoginResponse{Token: token, User: s.toUserDetail(user)}, nil
 }
 
 func (s *serviceImpl) QuickLogin(email string) (*dto.LoginResponse, error) {
@@ -107,7 +172,7 @@ func (s *serviceImpl) QuickLogin(email string) (*dto.LoginResponse, error) {
 		return nil, err
 	}
 
-	return &dto.LoginResponse{Token: token, User: user}, nil
+	return &dto.LoginResponse{Token: token, User: s.toUserDetail(user)}, nil
 }
 
 func (s *serviceImpl) GetQuickUsers() ([]domain.User, error) {
@@ -1030,4 +1095,367 @@ func (s *serviceImpl) GetAuditLogs(userID uint, module, search string, page, lim
 
 func (s *serviceImpl) GetAvailableMonths(userID uint) ([]map[string]interface{}, error) {
 	return s.repo.GetAvailableMonths(userID)
+}
+
+// Change Password
+func (s *serviceImpl) ChangePassword(userID uint, req dto.ChangePasswordRequest) error {
+	if req.NewPassword == "" {
+		return errors.New("password baru tidak boleh kosong")
+	}
+	if len(req.NewPassword) < 6 {
+		return errors.New("password baru minimal 6 karakter")
+	}
+
+	user, err := s.repo.GetUserByID(userID)
+	if err != nil {
+		return errors.New("pengguna tidak ditemukan")
+	}
+
+	if req.OldPassword != "" && !security.ComparePassword(req.OldPassword, user.PasswordHash) {
+		return errors.New("password lama tidak sesuai")
+	}
+
+	newHash, err := security.HashPassword(req.NewPassword)
+	if err != nil {
+		return errors.New("gagal mengenkripsi password")
+	}
+
+	if err := s.repo.UpdatePassword(userID, newHash); err != nil {
+		return err
+	}
+
+	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		UserID:    s.getOwnerID(userID),
+		Actor:     user.Name,
+		Module:    "Setting",
+		Action:    "CHANGE_PASSWORD",
+		Title:     "Perubahan Password Akun",
+		Detail:    fmt.Sprintf("Pengguna %s berhasil memperbarui password", user.Email),
+		CreatedAt: time.Now(),
+	})
+
+	return nil
+}
+
+// User Management (Super Admin only)
+func (s *serviceImpl) GetUsers(requesterID uint) ([]dto.UserDetailResponse, error) {
+	reqUser, err := s.repo.GetUserByID(requesterID)
+	if err != nil || reqUser.Role != "SUPER_ADMIN" {
+		return nil, errors.New("hanya Super Admin yang memiliki hak akses mengelola pengguna")
+	}
+
+	ownerID := s.getOwnerID(requesterID)
+	users, err := s.repo.GetUsers(ownerID)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]dto.UserDetailResponse, 0, len(users))
+	for _, u := range users {
+		userCopy := u
+		res = append(res, s.toUserDetail(&userCopy))
+	}
+
+	return res, nil
+}
+
+func (s *serviceImpl) CreateUser(requesterID uint, req dto.UserCreateRequest) (*dto.UserDetailResponse, error) {
+	reqUser, err := s.repo.GetUserByID(requesterID)
+	if err != nil || reqUser.Role != "SUPER_ADMIN" {
+		return nil, errors.New("hanya Super Admin yang berwenang menambahkan pengguna baru")
+	}
+
+	if req.Email == "" || req.Name == "" || req.Password == "" {
+		return nil, errors.New("nama, email, dan password wajib diisi")
+	}
+
+	if len(req.Password) < 6 {
+		return nil, errors.New("password minimal 6 karakter")
+	}
+
+	if existing, _ := s.repo.GetUserByEmail(req.Email); existing != nil && existing.ID > 0 {
+		return nil, errors.New("email sudah terdaftar dalam sistem")
+	}
+
+	roleCode := req.Role
+	if roleCode == "" {
+		roleCode = "STAFF"
+	}
+
+	menusStr := strings.Join(req.AllowedMenus, ",")
+	if roleCode == "SUPER_ADMIN" {
+		menusStr = "beranda,tugas,laporan,invoice,keuangan,pengaturan"
+	}
+
+	ownerID := s.getOwnerID(requesterID)
+	hashed, err := security.HashPassword(req.Password)
+	if err != nil {
+		return nil, errors.New("gagal mengenkripsi password")
+	}
+
+	newUser := domain.User{
+		Email:             req.Email,
+		PasswordHash:      hashed,
+		Name:              req.Name,
+		AvatarURL:         req.AvatarURL,
+		Role:              roleCode,
+		AllowedMenus:      menusStr,
+		OwnerID:           &ownerID,
+		Company:           reqUser.Company,
+		CompanyAddress:    reqUser.CompanyAddress,
+		TaxRate:           reqUser.TaxRate,
+		LogoURL:           reqUser.LogoURL,
+		SignatureURL:      reqUser.SignatureURL,
+		BankName:          reqUser.BankName,
+		BankAccountNumber: reqUser.BankAccountNumber,
+		BankAccountHolder: reqUser.BankAccountHolder,
+	}
+
+	if err := s.repo.CreateUser(&newUser); err != nil {
+		return nil, err
+	}
+
+	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		UserID:    ownerID,
+		Actor:     reqUser.Name,
+		Module:    "Setting",
+		Action:    "CREATE_USER",
+		Title:     "Penambahan Pengguna Baru",
+		Detail:    fmt.Sprintf("User baru %s (%s) dengan role %s berhasil didaftarkan", newUser.Name, newUser.Email, newUser.Role),
+		CreatedAt: time.Now(),
+	})
+
+	detail := s.toUserDetail(&newUser)
+	return &detail, nil
+}
+
+func (s *serviceImpl) UpdateUser(requesterID uint, targetUserID uint, req dto.UserUpdateRequest) (*dto.UserDetailResponse, error) {
+	reqUser, err := s.repo.GetUserByID(requesterID)
+	if err != nil || reqUser.Role != "SUPER_ADMIN" {
+		return nil, errors.New("hanya Super Admin yang berwenang mengubah data pengguna")
+	}
+
+	target, err := s.repo.GetUserByID(targetUserID)
+	if err != nil {
+		return nil, errors.New("pengguna tidak ditemukan")
+	}
+
+	if req.Name != "" {
+		target.Name = req.Name
+	}
+	if req.Email != "" && req.Email != target.Email {
+		if ex, _ := s.repo.GetUserByEmail(req.Email); ex != nil && ex.ID != target.ID {
+			return nil, errors.New("email sudah digunakan oleh pengguna lain")
+		}
+		target.Email = req.Email
+	}
+	if req.AvatarURL != "" {
+		target.AvatarURL = req.AvatarURL
+	}
+	if req.Password != "" {
+		if len(req.Password) < 6 {
+			return nil, errors.New("password baru minimal 6 karakter")
+		}
+		h, err := security.HashPassword(req.Password)
+		if err == nil {
+			target.PasswordHash = h
+		}
+	}
+
+	// Super Admin primary owner cannot have role revoked
+	if target.OwnerID == nil && target.Role == "SUPER_ADMIN" {
+		target.Role = "SUPER_ADMIN"
+		target.AllowedMenus = "beranda,tugas,laporan,invoice,keuangan,pengaturan"
+	} else {
+		if req.Role != "" {
+			target.Role = req.Role
+		}
+		if len(req.AllowedMenus) > 0 {
+			target.AllowedMenus = strings.Join(req.AllowedMenus, ",")
+		}
+	}
+
+	if err := s.repo.UpdateUser(target); err != nil {
+		return nil, err
+	}
+
+	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		UserID:    s.getOwnerID(requesterID),
+		Actor:     reqUser.Name,
+		Module:    "Setting",
+		Action:    "UPDATE_USER",
+		Title:     "Pembaruan Data Pengguna",
+		Detail:    fmt.Sprintf("User %s diperbarui oleh %s", target.Email, reqUser.Name),
+		CreatedAt: time.Now(),
+	})
+
+	detail := s.toUserDetail(target)
+	return &detail, nil
+}
+
+func (s *serviceImpl) DeleteUser(requesterID uint, targetUserID uint) error {
+	reqUser, err := s.repo.GetUserByID(requesterID)
+	if err != nil || reqUser.Role != "SUPER_ADMIN" {
+		return errors.New("hanya Super Admin yang berwenang menghapus pengguna")
+	}
+
+	if requesterID == targetUserID {
+		return errors.New("tidak dapat menghapus akun Anda sendiri")
+	}
+
+	target, err := s.repo.GetUserByID(targetUserID)
+	if err != nil {
+		return errors.New("pengguna tidak ditemukan")
+	}
+
+	if target.OwnerID == nil && target.Role == "SUPER_ADMIN" {
+		return errors.New("akun utama Super Admin tidak dapat dihapus")
+	}
+
+	if err := s.repo.DeleteUser(targetUserID); err != nil {
+		return err
+	}
+
+	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		UserID:    s.getOwnerID(requesterID),
+		Actor:     reqUser.Name,
+		Module:    "Setting",
+		Action:    "DELETE_USER",
+		Title:     "Penghapusan Pengguna",
+		Detail:    fmt.Sprintf("User %s (%s) dihapus oleh %s", target.Name, target.Email, reqUser.Name),
+		CreatedAt: time.Now(),
+	})
+
+	return nil
+}
+
+// Role Management
+func (s *serviceImpl) GetRoles() ([]dto.RoleResponse, error) {
+	roles, err := s.repo.GetRoles()
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]dto.RoleResponse, 0, len(roles))
+	for _, r := range roles {
+		var menuList []string
+		if r.Menus != "" {
+			for _, m := range strings.Split(r.Menus, ",") {
+				if t := strings.TrimSpace(m); t != "" {
+					menuList = append(menuList, t)
+				}
+			}
+		}
+		res = append(res, dto.RoleResponse{
+			ID:          r.ID,
+			Code:        r.Code,
+			Name:        r.Name,
+			Description: r.Description,
+			Menus:       menuList,
+			IsSystem:    r.IsSystem,
+		})
+	}
+	return res, nil
+}
+
+func (s *serviceImpl) CreateRole(requesterID uint, req dto.RoleRequest) (*dto.RoleResponse, error) {
+	reqUser, err := s.repo.GetUserByID(requesterID)
+	if err != nil || reqUser.Role != "SUPER_ADMIN" {
+		return nil, errors.New("hanya Super Admin yang berwenang membuat role baru")
+	}
+
+	if req.Code == "" || req.Name == "" {
+		return nil, errors.New("kode dan nama role wajib diisi")
+	}
+
+	cleanCode := strings.ToUpper(strings.TrimSpace(req.Code))
+	if ex, _ := s.repo.GetRoleByCode(cleanCode); ex != nil && ex.ID > 0 {
+		return nil, errors.New("kode role sudah ada")
+	}
+
+	menusStr := strings.Join(req.Menus, ",")
+	newRole := domain.Role{
+		Code:        cleanCode,
+		Name:        req.Name,
+		Description: req.Description,
+		Menus:       menusStr,
+		IsSystem:    false,
+	}
+
+	if err := s.repo.CreateRole(&newRole); err != nil {
+		return nil, err
+	}
+
+	return &dto.RoleResponse{
+		ID:          newRole.ID,
+		Code:        newRole.Code,
+		Name:        newRole.Name,
+		Description: newRole.Description,
+		Menus:       req.Menus,
+		IsSystem:    false,
+	}, nil
+}
+
+func (s *serviceImpl) UpdateRole(requesterID uint, id uint, req dto.RoleRequest) (*dto.RoleResponse, error) {
+	reqUser, err := s.repo.GetUserByID(requesterID)
+	if err != nil || reqUser.Role != "SUPER_ADMIN" {
+		return nil, errors.New("hanya Super Admin yang berwenang mengubah role")
+	}
+
+	role, err := s.repo.GetRoleByID(id)
+	if err != nil {
+		return nil, errors.New("role tidak ditemukan")
+	}
+
+	if req.Name != "" {
+		role.Name = req.Name
+	}
+	if req.Description != "" {
+		role.Description = req.Description
+	}
+	if len(req.Menus) > 0 {
+		if role.Code == "SUPER_ADMIN" {
+			role.Menus = "beranda,tugas,laporan,invoice,keuangan,pengaturan"
+		} else {
+			role.Menus = strings.Join(req.Menus, ",")
+		}
+	}
+
+	if err := s.repo.UpdateRole(role); err != nil {
+		return nil, err
+	}
+
+	var menuList []string
+	for _, m := range strings.Split(role.Menus, ",") {
+		if t := strings.TrimSpace(m); t != "" {
+			menuList = append(menuList, t)
+		}
+	}
+
+	return &dto.RoleResponse{
+		ID:          role.ID,
+		Code:        role.Code,
+		Name:        role.Name,
+		Description: role.Description,
+		Menus:       menuList,
+		IsSystem:    role.IsSystem,
+	}, nil
+}
+
+func (s *serviceImpl) DeleteRole(requesterID uint, id uint) error {
+	reqUser, err := s.repo.GetUserByID(requesterID)
+	if err != nil || reqUser.Role != "SUPER_ADMIN" {
+		return errors.New("hanya Super Admin yang berwenang menghapus role")
+	}
+
+	role, err := s.repo.GetRoleByID(id)
+	if err != nil {
+		return errors.New("role tidak ditemukan")
+	}
+
+	if role.IsSystem || role.Code == "SUPER_ADMIN" {
+		return errors.New("role sistem tidak dapat dihapus")
+	}
+
+	return s.repo.DeleteRole(id)
 }
