@@ -2,6 +2,8 @@ package repository
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"be-pm/internal/domain"
@@ -15,6 +17,7 @@ type Repository interface {
 	DB() *gorm.DB
 	AutoMigrate() error
 	SeedInitialData() error
+	CleanSampleData() error
 
 	// User / Settings
 	GetUserByEmail(email string) (*domain.User, error)
@@ -556,276 +559,64 @@ func (r *gormRepository) SeedInitialData() error {
 		return err
 	}
 
-	oct2026 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	return nil
+}
 
-	// Seed Tasks
-	task1 := domain.Task{
-		UserID:         user.ID,
-		Type:           "endorse",
-		Title:          "Endorse TikTok Somethinc Niacinamide Serum",
-		Brand:          "Somethinc Official",
-		FeeOrValue:     10000000,
-		DueDate:        oct2026.AddDate(0, 0, 27), // 2026-10-28
-		Deliverable:    "1x TikTok Video 60s + Keranjang Kuning",
-		Priority:       "high",
-		Status:         "waiting_payment",
-		Brief:          "Fokus pada tekstur ringan dan uji pemakaian selama 7 hari. Sertakan link affiliate di keranjang kuning.",
-		PicName:        "Sarah - Somethinc PIC",
-		PicPhone:       "+62 811-2345-6789",
-		Checklist: []domain.ChecklistItem{
-			{Text: "Penerimaan Produk Sample & Brief", Completed: true},
-			{Text: "Produksi Video Draft & Review Agensi", Completed: true},
-			{Text: "Tayang Konten TikTok & Sematkan Keranjang", Completed: true},
-			{Text: "Kirim Laporan Analytics Insights 24 Jam", Completed: false},
-		},
-	}
-	r.db.Create(&task1)
+// CleanSampleData purges mock sample tasks, invoices, transactions, and audit logs.
+// All user login accounts and system/custom roles are 100% preserved.
+func (r *gormRepository) CleanSampleData() error {
+	// 1. Break foreign key references between tasks and invoices
+	r.db.Exec(`UPDATE tasks SET related_invoice_id = NULL WHERE brand IN ('Somethinc Official', 'Erha Skincare', 'Scarlett Whitening', 'Internal Studio')`)
+	r.db.Exec(`UPDATE invoices SET related_task_id = NULL WHERE invoice_number LIKE 'INV/%/2026/%'`)
 
-	task2 := domain.Task{
-		UserID:         user.ID,
-		Type:           "barter",
-		Title:          "Barter Review Erha Acne Act Spot Gel",
-		Brand:          "Erha Skincare",
-		FeeOrValue:     650000,
-		DueDate:        oct2026.AddDate(0, 0, 25), // 2026-10-26
-		Platform:       "TikTok & IG Reels",
-		ShipmentNumber: "JNT-882910221",
-		Priority:       "medium",
-		Status:         "draft",
-		Brief:          "Review jujur pemakaian 3 hari untuk jerawat aktif. Tonjolkan kandungan salicylic acid.",
-		PicName:        "Rian Erha",
-		PicPhone:       "+62 812-9988-7766",
-		Checklist: []domain.ChecklistItem{
-			{Text: "Cek Resi & Unboxing Sample", Completed: true},
-			{Text: "Ambil Footage Before/After", Completed: false},
-			{Text: "Upload Reels & Mention Official", Completed: false},
-		},
-	}
-	r.db.Create(&task2)
+	// 2. Delete sample checklist items
+	r.db.Exec(`DELETE FROM checklist_items WHERE task_id IN (
+		SELECT id FROM tasks WHERE brand IN ('Somethinc Official', 'Erha Skincare', 'Scarlett Whitening', 'Internal Studio')
+	)`)
 
-	task3 := domain.Task{
-		UserID:           user.ID,
-		Type:             "endorse",
-		Title:            "Endorse Scarlett Whitening Body Lotion 11.11",
-		Brand:            "Scarlett Whitening",
-		FeeOrValue:       8500000,
-		DueDate:          oct2026.AddDate(0, 0, 14), // 2026-10-15
-		Deliverable:      "1x IG Reels + 2 Story Promo 11.11",
-		Priority:         "high",
-		Status:           "paid",
-		PaymentProofURL:  "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=600&auto=format&fit=crop&q=80",
-		PaymentProofName: "bukti_tf_bca_scarlett.jpg",
-		PicName:          "Budi Scarlett",
-		PicPhone:         "+62 812-4433-2211",
-		Checklist: []domain.ChecklistItem{
-			{Text: "Shooting Reels Konsep OOTD", Completed: true},
-			{Text: "Approval Script & Music Trending", Completed: true},
-			{Text: "Post Reels & Stories Swipe Up", Completed: true},
-		},
-	}
-	r.db.Create(&task3)
+	// 3. Delete sample invoice items
+	r.db.Exec(`DELETE FROM invoice_items WHERE invoice_id IN (
+		SELECT id FROM invoices WHERE invoice_number LIKE 'INV/%/2026/%'
+	)`)
 
-	task4 := domain.Task{
-		UserID:         user.ID,
-		Type:           "other",
-		Title:          "Live Streaming Shopee 11.11 Mega Sale (3 Jam Non-stop)",
-		Brand:          "Internal Studio",
-		FeeOrValue:     0,
-		DueDate:        time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC),
-		Priority:       "high",
-		Status:         "draft",
-		Brief:          "Live streaming session khusus studio affiliate untuk target omset GMV 100 Juta.",
-		Checklist: []domain.ChecklistItem{
-			{Text: "Setup Lighting Key & Rim Light", Completed: false},
-			{Text: "Display 20 Produk Sample di Meja", Completed: false},
-			{Text: "Briefing Co-Host & Rundown Promo Flash Sale", Completed: false},
-		},
-	}
-	r.db.Create(&task4)
+	// 4. Delete sample transactions
+	r.db.Exec(`DELETE FROM transactions WHERE description LIKE '%INV/AFFILIATE%' 
+		OR description LIKE '%INV/ENDORSE%' 
+		OR description LIKE '%Bonus Performance%' 
+		OR description LIKE '%Sewa Kamera%' 
+		OR description LIKE '%Fee Freelance Video Editor%' 
+		OR description LIKE '%Sewa Studio%' 
+		OR description LIKE '%Konsumsi Crew%'`)
 
-	// Seed Invoices
-	inv1 := domain.Invoice{
-		UserID:           user.ID,
-		InvoiceNumber:    "INV/AFFILIATE/2026/101",
-		ClientName:       "Shopee Affiliate Creator Program (PT Shopee International Indonesia)",
-		ClientEmail:      "finance-affiliate@shopee.co.id",
-		ClientPhone:      "+62 811-9876-5432",
-		ClientAddress:    "Pacific Century Place Lt. 25, SCBD Jakarta Selatan",
-		IssueDate:        oct2026.AddDate(0, 0, 4), // 2026-10-05
-		DueDate:          oct2026.AddDate(0, 0, 19),
-		IncludeTax:       true,
-		TaxRate:          11.0,
-		Subtotal:         17500000,
-		TaxAmount:        1925000,
-		GrandTotal:       19425000,
-		Status:           "paid",
-		PaymentProofURL:  "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=600&auto=format&fit=crop&q=80",
-		PaymentProofName: "bukti_tf_shopee_okt.jpg",
-		Items: []domain.InvoiceItem{
-			{Description: "Komisi Affiliate Campaign Shopee 10.10 Brand Day", Quantity: 1, UnitPrice: 17500000, Total: 17500000},
-		},
-	}
-	r.db.Create(&inv1)
+	// 5. Delete sample invoices
+	r.db.Exec(`DELETE FROM invoices WHERE invoice_number LIKE 'INV/%/2026/%'`)
 
-	inv2 := domain.Invoice{
-		UserID:        user.ID,
-		RelatedTaskID: &task1.ID,
-		InvoiceNumber: "INV/ENDORSE/2026/102",
-		ClientName:    "Somethinc Official (PT Beauty Haul Indonesia)",
-		ClientEmail:   "finance@beautyhaul.com",
-		ClientPhone:   "+62 811-2345-6789",
-		ClientAddress: "Green Lake City Rukan Cordoba Blok E No. 8, Tangerang",
-		IssueDate:     oct2026.AddDate(0, 0, 17), // 2026-10-18
-		DueDate:       oct2026.AddDate(0, 0, 31),
-		IncludeTax:    true,
-		TaxRate:       11.0,
-		Subtotal:      10000000,
-		TaxAmount:     1100000,
-		GrandTotal:    11100000,
-		Status:        "unpaid",
-		Items: []domain.InvoiceItem{
-			{Description: "Paket Endorse Video 60s TikTok + Keranjang Kuning", Quantity: 1, UnitPrice: 10000000, Total: 10000000},
-		},
-	}
-	r.db.Create(&inv2)
-	task1.RelatedInvoiceID = &inv2.ID
-	r.db.Save(&task1)
+	// 6. Delete sample tasks
+	r.db.Exec(`DELETE FROM tasks WHERE brand IN ('Somethinc Official', 'Erha Skincare', 'Scarlett Whitening', 'Internal Studio')`)
 
-	inv3 := domain.Invoice{
-		UserID:        user.ID,
-		InvoiceNumber: "INV/ENDORSE/2026/103",
-		ClientName:    "Erha Skincare Official",
-		ClientEmail:   "ap-vendor@erha.co.id",
-		ClientPhone:   "+62 812-9988-7766",
-		ClientAddress: "Jl. Iskandar Muda No. 18, Kebayoran Lama, Jakarta Selatan",
-		IssueDate:     oct2026.AddDate(0, 0, 21), // 2026-10-22
-		DueDate:       oct2026.AddDate(0, 1, 5),
-		IncludeTax:    false,
-		TaxRate:       0.0,
-		Subtotal:      3500000,
-		TaxAmount:     0,
-		GrandTotal:    3500000,
-		Status:        "unpaid",
-		Items: []domain.InvoiceItem{
-			{Description: "Jasa Pembuatan Konten Dedicated UGC Spot Gel", Quantity: 1, UnitPrice: 3500000, Total: 3500000},
-		},
-	}
-	r.db.Create(&inv3)
+	// 7. Delete sample audit logs
+	r.db.Exec(`DELETE FROM audit_logs WHERE title IN (
+		'Inisialisasi Pengaturan Studio',
+		'Membuat Tugas Endorse Somethinc',
+		'Penerbitan Invoice INV/AFFILIATE/2026/101',
+		'Pencatatan Biaya Rental Kamera',
+		'Pelunasan Tugas Scarlett Whitening'
+	)`)
 
-	inv4 := domain.Invoice{
-		UserID:           user.ID,
-		InvoiceNumber:    "INV/ENDORSE/2026/094",
-		ClientName:       "Skintific Indonesia (PT Maycare Global)",
-		ClientEmail:      "invoice@skintific.id",
-		ClientPhone:      "+62 812-4433-2211",
-		ClientAddress:    "AIA Central Lt. 18, Jl. Jend. Sudirman Kav. 48A, Jakarta",
-		IssueDate:        time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC),
-		DueDate:          time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC),
-		IncludeTax:       true,
-		TaxRate:          11.0,
-		Subtotal:         12000000,
-		TaxAmount:        1320000,
-		GrandTotal:       13320000,
-		Status:           "paid",
-		PaymentProofURL:  "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=600&auto=format&fit=crop&q=80",
-		PaymentProofName: "bukti_transfer_skintific.jpg",
-		Items: []domain.InvoiceItem{
-			{Description: "Dedicated Review Cover All Perfect Cushion", Quantity: 1, UnitPrice: 12000000, Total: 12000000},
-		},
-	}
-	r.db.Create(&inv4)
-
-	// Seed Transactions (matching Mockup Cashflow: Pemasukan Rp 61.480.000, Pengeluaran Rp 8.914.000, Net Rp 52.566.000)
-	tx1 := domain.Transaction{
-		UserID:           user.ID,
-		RelatedInvoiceID: &inv1.ID,
-		Type:             "income",
-		Amount:           19425000,
-		Description:      "Pelunasan Invoice INV/AFFILIATE/2026/101 (Shopee Indonesia)",
-		Category:         "Komisi Affiliate",
-		Date:             oct2026.AddDate(0, 0, 19),
-		AttachmentURL:    inv1.PaymentProofURL,
-		AttachmentName:   inv1.PaymentProofName,
-	}
-	r.db.Create(&tx1)
-
-	tx2 := domain.Transaction{
-		UserID:           user.ID,
-		RelatedInvoiceID: &inv4.ID,
-		Type:             "income",
-		Amount:           13320000,
-		Description:      "Pelunasan Invoice INV/ENDORSE/2026/094 (Skintific Indonesia)",
-		Category:         "Pembayaran Endorse",
-		Date:             oct2026.AddDate(0, 0, 10),
-		AttachmentURL:    inv4.PaymentProofURL,
-		AttachmentName:   inv4.PaymentProofName,
-	}
-	r.db.Create(&tx2)
-
-	tx3 := domain.Transaction{
-		UserID:      user.ID,
-		Type:        "income",
-		Amount:      28735000,
-		Description: "Bonus Performance Affiliate Brand Kolaborasi Q3",
-		Category:    "Komisi Affiliate",
-		Date:        oct2026.AddDate(0, 0, 5),
-	}
-	r.db.Create(&tx3)
-
-	// Expenses (Total: Rp 8.914.000)
-	exp1 := domain.Transaction{
-		UserID:         user.ID,
-		Type:           "expense",
-		Amount:         3500000,
-		Description:    "Sewa Kamera Sony FX3 & Lensa G-Master (3 Hari)",
-		Category:       "Peralatan & Gear",
-		Date:           oct2026.AddDate(0, 0, 12),
-		AttachmentURL:  "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=600&auto=format&fit=crop&q=80",
-		AttachmentName: "nota_rental_kamera.jpg",
-	}
-	r.db.Create(&exp1)
-
-	exp2 := domain.Transaction{
-		UserID:      user.ID,
-		Type:        "expense",
-		Amount:      2250000,
-		Description: "Fee Freelance Video Editor 3 Video Endorse",
-		Category:    "Tim & Editor",
-		Date:        oct2026.AddDate(0, 0, 18),
-	}
-	r.db.Create(&exp2)
-
-	exp3 := domain.Transaction{
-		UserID:      user.ID,
-		Type:        "expense",
-		Amount:      1850000,
-		Description: "Sewa Studio & Tambahan Lighting Aputure 300D",
-		Category:    "Produksi Konten",
-		Date:        oct2026.AddDate(0, 0, 20),
-	}
-	r.db.Create(&exp3)
-
-	exp4 := domain.Transaction{
-		UserID:      user.ID,
-		Type:        "expense",
-		Amount:      1314000,
-		Description: "Konsumsi Crew & Transportasi Pengambilan Sample",
-		Category:    "Operasional Lainnya",
-		Date:        oct2026.AddDate(0, 0, 22),
-	}
-	r.db.Create(&exp4)
-
-	// Seed Audit Logs
-	logs := []domain.AuditLog{
-		{UserID: user.ID, Actor: "Reza Winata", Module: "Setting", Action: "UPDATE_SETTINGS", Title: "Inisialisasi Pengaturan Studio", Detail: "Memperbarui identitas studio, NPWP, dan tarif PPN default 11%", CreatedAt: oct2026.AddDate(0, 0, 1)},
-		{UserID: user.ID, Actor: "Reza Winata", Module: "Tugas", Action: "CREATE_TASK", Title: "Membuat Tugas Endorse Somethinc", Detail: "Tugas kampanye fee Rp 10.000.000 dibuat dengan status DRAFT", CreatedAt: oct2026.AddDate(0, 0, 2)},
-		{UserID: user.ID, Actor: "Reza Winata", Module: "Invoice", Action: "CREATE_INVOICE", Title: "Penerbitan Invoice INV/AFFILIATE/2026/101", Detail: "Menerbitkan invoice Shopee Indonesia Rp 19.425.000", CreatedAt: oct2026.AddDate(0, 0, 4)},
-		{UserID: user.ID, Actor: "Reza Winata", Module: "Keuangan", Action: "CREATE_EXPENSE", Title: "Pencatatan Biaya Rental Kamera", Detail: "Biaya operasional sewa gear kamera senilai Rp 3.500.000", CreatedAt: oct2026.AddDate(0, 0, 12)},
-		{UserID: user.ID, Actor: "Reza Winata", Module: "Tugas", Action: "MARK_PAID", Title: "Pelunasan Tugas Scarlett Whitening", Detail: "Pelunasan tugas dan auto-generate invoice lunas Rp 9.435.000", CreatedAt: oct2026.AddDate(0, 0, 15)},
-	}
-	for _, l := range logs {
-		r.db.Create(&l)
+	// If CLEAN_SAMPLE_DATA or CLEAN_ALL_DATA is set to "true" in environment,
+	// also perform a full wipe of all operational tables while keeping users & roles.
+	if os.Getenv("CLEAN_SAMPLE_DATA") == "true" || os.Getenv("CLEAN_ALL_DATA") == "true" {
+		r.db.Exec("UPDATE tasks SET related_invoice_id = NULL")
+		r.db.Exec("UPDATE invoices SET related_task_id = NULL")
+		r.db.Exec("DELETE FROM checklist_items")
+		r.db.Exec("DELETE FROM invoice_items")
+		r.db.Exec("DELETE FROM transactions")
+		r.db.Exec("DELETE FROM invoices")
+		r.db.Exec("DELETE FROM tasks")
+		r.db.Exec("DELETE FROM audit_logs")
+		log.Println("[CLEANUP] Full operational data wipe executed (users and roles 100% preserved).")
 	}
 
+	log.Println("[CLEANUP] Sample data cleanup completed successfully. Login accounts and roles preserved.")
 	return nil
 }

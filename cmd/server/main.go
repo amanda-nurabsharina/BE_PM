@@ -50,11 +50,16 @@ func main() {
 	}
 	log.Println("Database tables migration completed successfully")
 
-	// Seed Initial Mock Data (Reza Winata, Tasks, Invoices, Cashflow, Audit Logs)
+	// Seed Initial Setup (Roles and initial super admin account if needed)
 	if err := repo.SeedInitialData(); err != nil {
 		log.Printf("Warning during initial seeding: %v", err)
 	} else {
-		log.Println("Initial seed data checked / synchronized")
+		log.Println("Initial setup (roles & super admin) synchronized")
+	}
+
+	// Purge sample/mock data (tasks, invoices, cashflow, audit logs) while preserving login accounts & roles
+	if err := repo.CleanSampleData(); err != nil {
+		log.Printf("Warning during sample data cleanup: %v", err)
 	}
 
 	// Initialize Service Layer & Handlers
