@@ -1,0 +1,7 @@
+server.exe
+creatortask.db
+uploads/*
+!uploads/.gitkeep
+.git
+.env
+.DS_Store
