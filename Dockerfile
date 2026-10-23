@@ -1,10 +1,13 @@
 # Multi-stage Dockerfile for Go Fiber Backend
-FROM golang:1.25-alpine AS builder
+FROM golang:alpine AS builder
 
 WORKDIR /app
 
-# Install git and build essentials
+# Install git and certificates
 RUN apk add --no-cache git ca-certificates tzdata
+
+ENV CGO_ENABLED=0
+ENV GOTOOLCHAIN=auto
 
 # Cache dependencies
 COPY go.mod go.sum ./
@@ -12,10 +15,10 @@ RUN go mod download
 
 # Copy source code and build
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /app/server cmd/server/main.go
+RUN go build -ldflags="-w -s" -o /app/server cmd/server/main.go
 
 # Production Runner Stage
-FROM alpine:3.20
+FROM alpine:latest
 
 WORKDIR /app
 
