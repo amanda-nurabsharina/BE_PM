@@ -15,7 +15,7 @@ RUN go mod download
 
 # Copy source code and build
 COPY . .
-RUN go build -ldflags="-w -s" -o /app/server cmd/server/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/server ./cmd/server
 
 # Production Runner Stage
 FROM alpine:latest
