@@ -6,9 +6,29 @@ import (
 	"gorm.io/gorm"
 )
 
+// Tenant represents a multi-tenant workspace/studio
+type Tenant struct {
+	ID                uint           `gorm:"primaryKey" json:"id"`
+	Name              string         `gorm:"size:200;not null" json:"name"`
+	Slug              string         `gorm:"size:100;uniqueIndex;not null" json:"slug"`
+	Status            string         `gorm:"size:50;default:'active'" json:"status"` // active | suspended
+	LogoURL           string         `gorm:"type:text" json:"logo_url"`
+	Phone             string         `gorm:"size:50" json:"phone"`
+	CompanyAddress    string         `gorm:"type:text" json:"company_address"`
+	NPWP              string         `gorm:"size:50" json:"npwp"`
+	TaxRate           float64        `gorm:"default:11.0" json:"tax_rate"`
+	BankName          string         `gorm:"size:100" json:"bank_name"`
+	BankAccountNumber string         `gorm:"size:100" json:"bank_account_number"`
+	BankAccountHolder string         `gorm:"size:150" json:"bank_account_holder"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
 // User represents Creator Owner Profile & Studio Configuration
 type User struct {
 	ID                uint           `gorm:"primaryKey" json:"id"`
+	TenantID          uint           `gorm:"index;default:1;not null" json:"tenant_id"`
 	Email             string         `gorm:"size:150;uniqueIndex;not null" json:"email"`
 	PasswordHash      string         `gorm:"size:255;not null" json:"-"`
 	Name              string         `gorm:"size:150;not null" json:"name"`
@@ -26,6 +46,7 @@ type User struct {
 	Role              string         `gorm:"size:50;default:'SUPER_ADMIN'" json:"role"`
 	AllowedMenus      string         `gorm:"type:text" json:"allowed_menus"` // Comma-separated: "beranda,tugas,laporan,invoice,keuangan,pengaturan"
 	OwnerID           *uint          `gorm:"index" json:"owner_id"`         // Pointer to studio owner user ID
+	IsOwner           bool           `gorm:"default:false" json:"is_owner"` // True if initial tenant owner
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
 	DeletedAt         gorm.DeletedAt `gorm:"index" json:"-"`
@@ -46,6 +67,7 @@ type Role struct {
 // Task represents Endorse, Barter, or Internal Studio Task
 type Task struct {
 	ID               uint            `gorm:"primaryKey" json:"id"`
+	TenantID         uint            `gorm:"index;default:1;not null" json:"tenant_id"`
 	UserID           uint            `gorm:"index;not null" json:"user_id"`
 	Type             string          `gorm:"size:50;not null" json:"type"` // endorse | barter | other
 	Title            string          `gorm:"size:255;not null" json:"title"`
@@ -82,6 +104,7 @@ type ChecklistItem struct {
 // Invoice represents official billing invoice
 type Invoice struct {
 	ID               uint           `gorm:"primaryKey" json:"id"`
+	TenantID         uint           `gorm:"index;default:1;not null" json:"tenant_id"`
 	UserID           uint           `gorm:"index;not null" json:"user_id"`
 	RelatedTaskID    *uint          `gorm:"index" json:"related_task_id"`
 	InvoiceNumber    string         `gorm:"size:100;uniqueIndex;not null" json:"invoice_number"`
@@ -120,6 +143,7 @@ type InvoiceItem struct {
 // Transaction represents Cashflow ledger entry (Income or Expense)
 type Transaction struct {
 	ID               uint           `gorm:"primaryKey" json:"id"`
+	TenantID         uint           `gorm:"index;default:1;not null" json:"tenant_id"`
 	UserID           uint           `gorm:"index;not null" json:"user_id"`
 	RelatedInvoiceID *uint          `gorm:"uniqueIndex" json:"related_invoice_id"` // Unique constraint prevents duplicate payments
 	Type             string         `gorm:"size:20;not null" json:"type"`          // income | expense
@@ -137,6 +161,7 @@ type Transaction struct {
 // AuditLog represents immutable system action log
 type AuditLog struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
+	TenantID  uint      `gorm:"index;default:1;not null" json:"tenant_id"`
 	UserID    uint      `gorm:"index;not null" json:"user_id"`
 	Actor     string    `gorm:"size:150;not null" json:"actor"`
 	Module    string    `gorm:"size:50;not null" json:"module"` // Tugas | Invoice | Keuangan | Setting
@@ -146,11 +171,12 @@ type AuditLog struct {
 	CreatedAt time.Time `gorm:"index" json:"created_at"`
 }
 
-// SequenceCounter tracks atomic sequence numbers per year and prefix
+// SequenceCounter tracks atomic sequence numbers per tenant, year and prefix
 type SequenceCounter struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	Year     int    `gorm:"uniqueIndex:idx_year_prefix;not null" json:"year"`
-	Prefix   string `gorm:"size:50;uniqueIndex:idx_year_prefix;not null" json:"prefix"`
-	LastSeq  int    `gorm:"default:0" json:"last_seq"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	TenantID  uint      `gorm:"uniqueIndex:idx_tenant_year_prefix;default:1;not null" json:"tenant_id"`
+	Year      int       `gorm:"uniqueIndex:idx_tenant_year_prefix;not null" json:"year"`
+	Prefix    string    `gorm:"size:50;uniqueIndex:idx_tenant_year_prefix;not null" json:"prefix"`
+	LastSeq   int       `gorm:"default:0" json:"last_seq"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

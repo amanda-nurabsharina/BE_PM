@@ -2,17 +2,64 @@ package dto
 
 // Auth DTOs
 type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email      string `json:"email"`
+	Password   string `json:"password"`
+	TenantSlug string `json:"tenant_slug"`
 }
 
 type QuickLoginRequest struct {
-	Email string `json:"email"`
+	Email      string `json:"email"`
+	TenantSlug string `json:"tenant_slug"`
 }
 
 type LoginResponse struct {
 	Token string      `json:"token"`
 	User  interface{} `json:"user"`
+}
+
+// Tenant DTOs
+type CreateTenantRequest struct {
+	Name              string  `json:"name"`
+	Slug              string  `json:"slug"`
+	OwnerName         string  `json:"owner_name"`
+	OwnerEmail        string  `json:"owner_email"`
+	OwnerPassword     string  `json:"owner_password"`
+	Phone             string  `json:"phone"`
+	CompanyAddress    string  `json:"company_address"`
+	NPWP              string  `json:"npwp"`
+	TaxRate           float64 `json:"tax_rate"`
+	BankName          string  `json:"bank_name"`
+	BankAccountNumber string  `json:"bank_account_number"`
+	BankAccountHolder string  `json:"bank_account_holder"`
+}
+
+type TenantResponse struct {
+	ID                uint    `json:"id"`
+	Name              string  `json:"name"`
+	Slug              string  `json:"slug"`
+	Status            string  `json:"status"`
+	LogoURL           string  `json:"logo_url"`
+	Phone             string  `json:"phone"`
+	CompanyAddress    string  `json:"company_address"`
+	NPWP              string  `json:"npwp"`
+	TaxRate           float64 `json:"tax_rate"`
+	BankName          string  `json:"bank_name"`
+	BankAccountNumber string  `json:"bank_account_number"`
+	BankAccountHolder string  `json:"bank_account_holder"`
+	OwnerID           uint    `json:"owner_id"`
+	OwnerName         string  `json:"owner_name"`
+	OwnerEmail        string  `json:"owner_email"`
+	TotalUsers        int64   `json:"total_users"`
+	TotalTasks        int64   `json:"total_tasks"`
+	CreatedAt         string  `json:"created_at"`
+}
+
+type UpdateTenantStatusRequest struct {
+	Status string `json:"status"` // active | suspended
+}
+
+type ResetTenantOwnerPasswordRequest struct {
+	NewPassword string `json:"new_password"`
 }
 
 // Task DTOs
@@ -111,15 +158,20 @@ type UserUpdateRequest struct {
 }
 
 type UserDetailResponse struct {
-	ID           uint     `json:"id"`
-	Email        string   `json:"email"`
-	Name         string   `json:"name"`
-	AvatarURL    string   `json:"avatar_url"`
-	Role         string   `json:"role"`
-	RoleName     string   `json:"role_name"`
-	AllowedMenus []string `json:"allowed_menus"`
-	OwnerID      *uint    `json:"owner_id"`
-	CreatedAt    string   `json:"created_at"`
+	ID           uint        `json:"id"`
+	TenantID     uint        `json:"tenant_id"`
+	TenantSlug   string      `json:"tenant_slug"`
+	TenantName   string      `json:"tenant_name"`
+	IsOwner      bool        `json:"is_owner"`
+	Email        string      `json:"email"`
+	Name         string      `json:"name"`
+	AvatarURL    string      `json:"avatar_url"`
+	Role         string      `json:"role"`
+	RoleName     string      `json:"role_name"`
+	AllowedMenus []string    `json:"allowed_menus"`
+	OwnerID      *uint       `json:"owner_id"`
+	Tenant       interface{} `json:"tenant,omitempty"`
+	CreatedAt    string      `json:"created_at"`
 }
 
 type RoleRequest struct {

@@ -16,8 +16,19 @@ import (
 type Repository interface {
 	DB() *gorm.DB
 	AutoMigrate() error
+	AutoMigrateMultiTenant() error
 	SeedInitialData() error
 	CleanSampleData() error
+
+	// Tenants
+	GetTenants() ([]domain.Tenant, error)
+	GetTenantByID(id uint) (*domain.Tenant, error)
+	GetTenantBySlug(slug string) (*domain.Tenant, error)
+	CreateTenant(tenant *domain.Tenant) error
+	UpdateTenant(tenant *domain.Tenant) error
+	UpdateTenantStatus(id uint, status string) error
+	GetTenantStats(id uint) (int64, int64, error)
+	GetUserByEmailAndTenant(email string, tenantID uint) (*domain.User, error)
 
 	// User / Settings
 	GetUserByEmail(email string) (*domain.User, error)
@@ -25,7 +36,7 @@ type Repository interface {
 	CreateUser(user *domain.User) error
 	UpdateUser(user *domain.User) error
 	DeleteUser(userID uint) error
-	GetUsers(ownerID uint) ([]domain.User, error)
+	GetUsers(tenantID uint) ([]domain.User, error)
 	GetQuickUsers() ([]domain.User, error)
 	UpdatePassword(userID uint, newHash string) error
 
@@ -38,33 +49,33 @@ type Repository interface {
 	DeleteRole(id uint) error
 
 	// Tasks
-	GetTasks(userID uint, month, year int, taskType, status string, page, limit int) ([]domain.Task, int64, error)
-	GetTaskByID(userID, taskID uint) (*domain.Task, error)
+	GetTasks(tenantID uint, month, year int, taskType, status string, page, limit int) ([]domain.Task, int64, error)
+	GetTaskByID(tenantID, taskID uint) (*domain.Task, error)
 	CreateTask(task *domain.Task) error
 	UpdateTask(task *domain.Task) error
-	DeleteTask(userID, taskID uint) error
-	ToggleChecklistItem(userID, taskID, itemID uint) (*domain.ChecklistItem, error)
+	DeleteTask(tenantID, taskID uint) error
+	ToggleChecklistItem(tenantID, taskID, itemID uint) (*domain.ChecklistItem, error)
 
 	// Invoices
-	GetInvoices(userID uint, month, year int, status string, page, limit int) ([]domain.Invoice, int64, error)
-	GetInvoiceByID(userID, invoiceID uint) (*domain.Invoice, error)
+	GetInvoices(tenantID uint, month, year int, status string, page, limit int) ([]domain.Invoice, int64, error)
+	GetInvoiceByID(tenantID, invoiceID uint) (*domain.Invoice, error)
 	CreateInvoice(invoice *domain.Invoice) error
 	UpdateInvoice(invoice *domain.Invoice) error
-	GetUnpaidInvoicesCount(userID uint) (int64, int64, error) // count, sum
-	NextInvoiceSequence(tx *gorm.DB, year int, prefix string) (int, error)
+	GetUnpaidInvoicesCount(tenantID uint) (int64, int64, error) // count, sum
+	NextInvoiceSequence(tx *gorm.DB, tenantID uint, year int, prefix string) (int, error)
 
 	// Cashflow
-	GetTransactions(userID uint, month, year int, txType string, page, limit int) ([]domain.Transaction, int64, error)
-	GetCashflowSummary(userID uint, month, year int) (int64, int64, int64, error) // income, expense, net
+	GetTransactions(tenantID uint, month, year int, txType string, page, limit int) ([]domain.Transaction, int64, error)
+	GetCashflowSummary(tenantID uint, month, year int) (int64, int64, int64, error) // income, expense, net
 	CreateTransaction(tx *domain.Transaction) error
-	DeleteTransaction(userID, txID uint) error
+	DeleteTransaction(tenantID, txID uint) error
 
 	// Audit Logs
-	GetAuditLogs(userID uint, module, search string, page, limit int) ([]domain.AuditLog, int64, error)
+	GetAuditLogs(tenantID uint, module, search string, page, limit int) ([]domain.AuditLog, int64, error)
 	CreateAuditLog(log *domain.AuditLog) error
 
 	// Dynamic Date Options
-	GetAvailableMonths(userID uint) ([]map[string]interface{}, error)
+	GetAvailableMonths(tenantID uint) ([]map[string]interface{}, error)
 }
 
 type gormRepository struct {
@@ -81,6 +92,7 @@ func (r *gormRepository) DB() *gorm.DB {
 
 func (r *gormRepository) AutoMigrate() error {
 	return r.db.AutoMigrate(
+		&domain.Tenant{},
 		&domain.User{},
 		&domain.Role{},
 		&domain.Task{},
@@ -91,6 +103,107 @@ func (r *gormRepository) AutoMigrate() error {
 		&domain.AuditLog{},
 		&domain.SequenceCounter{},
 	)
+}
+
+// AutoMigrateMultiTenant ensures the initial default tenant exists and automatically links
+// all existing tasks, invoices, cashflow, audit logs, and counters to Tenant ID 1 without data loss.
+func (r *gormRepository) AutoMigrateMultiTenant() error {
+	// 1. Ensure default tenant exists
+	var tenantCount int64
+	r.db.Model(&domain.Tenant{}).Count(&tenantCount)
+	if tenantCount == 0 {
+		defaultTenant := domain.Tenant{
+			ID:                1,
+			Name:              "Reza Studio (Affiliator Network)",
+			Slug:              "reza-studio",
+			Status:            "active",
+			CompanyAddress:    "Studio Kreatif Lt. 3, Jl. Senopati No. 42, Jaksel",
+			Phone:             "+62 812-3456-7890",
+			NPWP:              "09.254.678.9-012.000",
+			TaxRate:           11.0,
+			BankName:          "Bank Central Asia (BCA)",
+			BankAccountNumber: "8830192831",
+			BankAccountHolder: "Reza Winata",
+		}
+		if err := r.db.Create(&defaultTenant).Error; err != nil {
+			log.Printf("Warning creating default tenant: %v", err)
+		} else {
+			log.Println("[MIGRATION] Default tenant 'reza-studio' (ID: 1) initialized.")
+		}
+	}
+
+	// 2. Automatically associate all existing orphaned/unmigrated records to default tenant ID = 1
+	r.db.Exec("UPDATE users SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
+	r.db.Exec("UPDATE tasks SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
+	r.db.Exec("UPDATE invoices SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
+	r.db.Exec("UPDATE transactions SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
+	r.db.Exec("UPDATE audit_logs SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
+	r.db.Exec("UPDATE sequence_counters SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
+
+	// 3. Mark the primary creator user as tenant owner
+	r.db.Model(&domain.User{}).Where("email = ? OR (tenant_id = 1 AND owner_id IS NULL)", "reza@studio.id").
+		Updates(map[string]interface{}{
+			"tenant_id": 1,
+			"is_owner":  true,
+		})
+
+	// 4. Synchronize PostgreSQL auto-increment sequences to prevent duplicate key constraint violations
+	coreTables := []string{"tenants", "users", "tasks", "invoices", "transactions", "roles", "checklist_items", "audit_logs", "sequence_counters"}
+	for _, tbl := range coreTables {
+		syncSQL := fmt.Sprintf("SELECT setval(pg_get_serial_sequence('%s', 'id'), COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM %s", tbl, tbl)
+		if err := r.db.Exec(syncSQL).Error; err != nil {
+			log.Printf("Notice syncing sequence for table %s: %v", tbl, err)
+		}
+	}
+	log.Println("[MIGRATION] PostgreSQL primary key sequences synchronized successfully.")
+
+	log.Println("[MIGRATION] Multi-tenant migration verified: all existing records safely preserved and linked to Tenant 1.")
+	return nil
+}
+
+// Tenant methods
+func (r *gormRepository) GetTenants() ([]domain.Tenant, error) {
+	var tenants []domain.Tenant
+	err := r.db.Order("id asc").Find(&tenants).Error
+	return tenants, err
+}
+
+func (r *gormRepository) GetTenantByID(id uint) (*domain.Tenant, error) {
+	var tenant domain.Tenant
+	err := r.db.First(&tenant, id).Error
+	return &tenant, err
+}
+
+func (r *gormRepository) GetTenantBySlug(slug string) (*domain.Tenant, error) {
+	var tenant domain.Tenant
+	err := r.db.Where("slug = ?", slug).First(&tenant).Error
+	return &tenant, err
+}
+
+func (r *gormRepository) CreateTenant(tenant *domain.Tenant) error {
+	return r.db.Create(tenant).Error
+}
+
+func (r *gormRepository) UpdateTenant(tenant *domain.Tenant) error {
+	return r.db.Save(tenant).Error
+}
+
+func (r *gormRepository) UpdateTenantStatus(id uint, status string) error {
+	return r.db.Model(&domain.Tenant{}).Where("id = ?", id).Update("status", status).Error
+}
+
+func (r *gormRepository) GetTenantStats(id uint) (int64, int64, error) {
+	var userCount int64
+	var taskCount int64
+	r.db.Model(&domain.User{}).Where("tenant_id = ?", id).Count(&userCount)
+	r.db.Model(&domain.Task{}).Where("tenant_id = ?", id).Count(&taskCount)
+	return userCount, taskCount, nil
+}
+
+func (r *gormRepository) GetUserByEmailAndTenant(email string, tenantID uint) (*domain.User, error) {
+	var user domain.User
+	err := r.db.Where("email = ? AND tenant_id = ?", email, tenantID).First(&user).Error
+	return &user, err
 }
 
 // User methods
@@ -118,15 +231,17 @@ func (r *gormRepository) DeleteUser(userID uint) error {
 	return r.db.Delete(&domain.User{}, userID).Error
 }
 
-func (r *gormRepository) GetUsers(ownerID uint) ([]domain.User, error) {
+func (r *gormRepository) GetUsers(tenantID uint) ([]domain.User, error) {
 	var users []domain.User
-	err := r.db.Where("id = ? OR owner_id = ?", ownerID, ownerID).Order("id asc").Find(&users).Error
+	err := r.db.Where("tenant_id = ?", tenantID).Order("id asc").Find(&users).Error
 	return users, err
 }
 
 func (r *gormRepository) GetQuickUsers() ([]domain.User, error) {
 	var users []domain.User
-	err := r.db.Select("id, name, email, company, avatar_url, role, allowed_menus").Find(&users).Error
+	err := r.db.Select("id, tenant_id, name, email, company, avatar_url, role, allowed_menus").
+		Where("email != ? AND role != ?", "superadmin@creatortask.id", "SUPER_ADMIN").
+		Order("tenant_id asc, id asc").Find(&users).Error
 	return users, err
 }
 
@@ -137,7 +252,7 @@ func (r *gormRepository) UpdatePassword(userID uint, newHash string) error {
 // Role methods
 func (r *gormRepository) GetRoles() ([]domain.Role, error) {
 	var roles []domain.Role
-	err := r.db.Order("id asc").Find(&roles).Error
+	err := r.db.Where("code != ?", "SUPER_ADMIN").Order("id asc").Find(&roles).Error
 	return roles, err
 }
 
@@ -172,11 +287,11 @@ func (r *gormRepository) DeleteRole(id uint) error {
 }
 
 // Tasks methods
-func (r *gormRepository) GetTasks(userID uint, month, year int, taskType, status string, page, limit int) ([]domain.Task, int64, error) {
+func (r *gormRepository) GetTasks(tenantID uint, month, year int, taskType, status string, page, limit int) ([]domain.Task, int64, error) {
 	var tasks []domain.Task
 	var total int64
 
-	q := r.db.Model(&domain.Task{}).Where("user_id = ?", userID)
+	q := r.db.Model(&domain.Task{}).Where("tenant_id = ?", tenantID)
 
 	if taskType != "" && taskType != "all" && taskType != "semua" {
 		q = q.Where("type = ?", taskType)
@@ -209,9 +324,9 @@ func (r *gormRepository) GetTasks(userID uint, month, year int, taskType, status
 	return tasks, total, err
 }
 
-func (r *gormRepository) GetTaskByID(userID, taskID uint) (*domain.Task, error) {
+func (r *gormRepository) GetTaskByID(tenantID, taskID uint) (*domain.Task, error) {
 	var task domain.Task
-	err := r.db.Where("id = ? AND user_id = ?", taskID, userID).Preload("Checklist").First(&task).Error
+	err := r.db.Where("id = ? AND tenant_id = ?", taskID, tenantID).Preload("Checklist").First(&task).Error
 	return &task, err
 }
 
@@ -223,15 +338,15 @@ func (r *gormRepository) UpdateTask(task *domain.Task) error {
 	return r.db.Save(task).Error
 }
 
-func (r *gormRepository) DeleteTask(userID, taskID uint) error {
-	return r.db.Where("id = ? AND user_id = ?", taskID, userID).Delete(&domain.Task{}).Error
+func (r *gormRepository) DeleteTask(tenantID, taskID uint) error {
+	return r.db.Where("id = ? AND tenant_id = ?", taskID, tenantID).Delete(&domain.Task{}).Error
 }
 
-func (r *gormRepository) ToggleChecklistItem(userID, taskID, itemID uint) (*domain.ChecklistItem, error) {
+func (r *gormRepository) ToggleChecklistItem(tenantID, taskID, itemID uint) (*domain.ChecklistItem, error) {
 	var item domain.ChecklistItem
-	// Ensure item belongs to task and task belongs to user
+	// Ensure item belongs to task and task belongs to tenant
 	var task domain.Task
-	if err := r.db.Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
+	if err := r.db.Where("id = ? AND tenant_id = ?", taskID, tenantID).First(&task).Error; err != nil {
 		return nil, err
 	}
 
@@ -245,11 +360,11 @@ func (r *gormRepository) ToggleChecklistItem(userID, taskID, itemID uint) (*doma
 }
 
 // Invoices methods
-func (r *gormRepository) GetInvoices(userID uint, month, year int, status string, page, limit int) ([]domain.Invoice, int64, error) {
+func (r *gormRepository) GetInvoices(tenantID uint, month, year int, status string, page, limit int) ([]domain.Invoice, int64, error) {
 	var invoices []domain.Invoice
 	var total int64
 
-	q := r.db.Model(&domain.Invoice{}).Where("user_id = ?", userID)
+	q := r.db.Model(&domain.Invoice{}).Where("tenant_id = ?", tenantID)
 
 	if status != "" && status != "all" && status != "semua" {
 		if status == "unpaid" || status == "pending" {
@@ -278,9 +393,9 @@ func (r *gormRepository) GetInvoices(userID uint, month, year int, status string
 	return invoices, total, err
 }
 
-func (r *gormRepository) GetInvoiceByID(userID, invoiceID uint) (*domain.Invoice, error) {
+func (r *gormRepository) GetInvoiceByID(tenantID, invoiceID uint) (*domain.Invoice, error) {
 	var inv domain.Invoice
-	err := r.db.Where("id = ? AND user_id = ?", invoiceID, userID).Preload("Items").First(&inv).Error
+	err := r.db.Where("id = ? AND tenant_id = ?", invoiceID, tenantID).Preload("Items").First(&inv).Error
 	return &inv, err
 }
 
@@ -292,24 +407,27 @@ func (r *gormRepository) UpdateInvoice(invoice *domain.Invoice) error {
 	return r.db.Save(invoice).Error
 }
 
-func (r *gormRepository) GetUnpaidInvoicesCount(userID uint) (int64, int64, error) {
+func (r *gormRepository) GetUnpaidInvoicesCount(tenantID uint) (int64, int64, error) {
 	var count int64
 	var sum int64
-	err := r.db.Model(&domain.Invoice{}).Where("user_id = ? AND status != ?", userID, "paid").Count(&count).Error
+	err := r.db.Model(&domain.Invoice{}).Where("tenant_id = ? AND status != ?", tenantID, "paid").Count(&count).Error
 	if err != nil {
 		return 0, 0, err
 	}
 
-	row := r.db.Model(&domain.Invoice{}).Where("user_id = ? AND status != ?", userID, "paid").Select("COALESCE(SUM(grand_total), 0)").Row()
+	row := r.db.Model(&domain.Invoice{}).Where("tenant_id = ? AND status != ?", tenantID, "paid").Select("COALESCE(SUM(grand_total), 0)").Row()
 	_ = row.Scan(&sum)
 	return count, sum, nil
 }
 
-func (r *gormRepository) NextInvoiceSequence(tx *gorm.DB, year int, prefix string) (int, error) {
+func (r *gormRepository) NextInvoiceSequence(tx *gorm.DB, tenantID uint, year int, prefix string) (int, error) {
 	var counter domain.SequenceCounter
+	if tenantID == 0 {
+		tenantID = 1
+	}
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("year = ? AND prefix = ?", year, prefix).
-		FirstOrCreate(&counter, domain.SequenceCounter{Year: year, Prefix: prefix, LastSeq: 0}).Error
+		Where("tenant_id = ? AND year = ? AND prefix = ?", tenantID, year, prefix).
+		FirstOrCreate(&counter, domain.SequenceCounter{TenantID: tenantID, Year: year, Prefix: prefix, LastSeq: 0}).Error
 	if err != nil {
 		return 0, err
 	}
@@ -322,11 +440,11 @@ func (r *gormRepository) NextInvoiceSequence(tx *gorm.DB, year int, prefix strin
 }
 
 // Cashflow methods
-func (r *gormRepository) GetTransactions(userID uint, month, year int, txType string, page, limit int) ([]domain.Transaction, int64, error) {
+func (r *gormRepository) GetTransactions(tenantID uint, month, year int, txType string, page, limit int) ([]domain.Transaction, int64, error) {
 	var txs []domain.Transaction
 	var total int64
 
-	q := r.db.Model(&domain.Transaction{}).Where("user_id = ?", userID)
+	q := r.db.Model(&domain.Transaction{}).Where("tenant_id = ?", tenantID)
 
 	if txType != "" && txType != "all" && txType != "semua" {
 		q = q.Where("type = ?", txType)
@@ -351,11 +469,11 @@ func (r *gormRepository) GetTransactions(userID uint, month, year int, txType st
 	return txs, total, err
 }
 
-func (r *gormRepository) GetCashflowSummary(userID uint, month, year int) (int64, int64, int64, error) {
+func (r *gormRepository) GetCashflowSummary(tenantID uint, month, year int) (int64, int64, int64, error) {
 	var income int64
 	var expense int64
 
-	q := r.db.Model(&domain.Transaction{}).Where("user_id = ?", userID)
+	q := r.db.Model(&domain.Transaction{}).Where("tenant_id = ?", tenantID)
 	if year > 0 && month > 0 {
 		startDate := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 		endDate := startDate.AddDate(0, 1, 0)
@@ -363,7 +481,7 @@ func (r *gormRepository) GetCashflowSummary(userID uint, month, year int) (int64
 	}
 
 	_ = q.Where("type = ?", "income").Select("COALESCE(SUM(amount), 0)").Row().Scan(&income)
-	_ = r.db.Model(&domain.Transaction{}).Where("user_id = ?", userID).
+	_ = r.db.Model(&domain.Transaction{}).Where("tenant_id = ?", tenantID).
 		Where(func() *gorm.DB {
 			if year > 0 && month > 0 {
 				startDate := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
@@ -381,10 +499,10 @@ func (r *gormRepository) CreateTransaction(tx *domain.Transaction) error {
 	return r.db.Create(tx).Error
 }
 
-func (r *gormRepository) DeleteTransaction(userID, txID uint) error {
+func (r *gormRepository) DeleteTransaction(tenantID, txID uint) error {
 	// Must not be related to an invoice (BR-09)
 	var t domain.Transaction
-	if err := r.db.Where("id = ? AND user_id = ?", txID, userID).First(&t).Error; err != nil {
+	if err := r.db.Where("id = ? AND tenant_id = ?", txID, tenantID).First(&t).Error; err != nil {
 		return err
 	}
 	if t.RelatedInvoiceID != nil {
@@ -394,11 +512,11 @@ func (r *gormRepository) DeleteTransaction(userID, txID uint) error {
 }
 
 // Audit Logs methods
-func (r *gormRepository) GetAuditLogs(userID uint, module, search string, page, limit int) ([]domain.AuditLog, int64, error) {
+func (r *gormRepository) GetAuditLogs(tenantID uint, module, search string, page, limit int) ([]domain.AuditLog, int64, error) {
 	var logs []domain.AuditLog
 	var total int64
 
-	q := r.db.Model(&domain.AuditLog{}).Where("user_id = ?", userID)
+	q := r.db.Model(&domain.AuditLog{}).Where("tenant_id = ?", tenantID)
 
 	if module != "" && module != "all" && module != "semua" {
 		q = q.Where("module = ?", module)
@@ -423,7 +541,7 @@ func (r *gormRepository) CreateAuditLog(log *domain.AuditLog) error {
 }
 
 // Dynamic months from actual database dates
-func (r *gormRepository) GetAvailableMonths(userID uint) ([]map[string]interface{}, error) {
+func (r *gormRepository) GetAvailableMonths(tenantID uint) ([]map[string]interface{}, error) {
 	monthMap := make(map[string]map[string]interface{})
 
 	// Month names in Indonesian
@@ -443,7 +561,7 @@ func (r *gormRepository) GetAvailableMonths(userID uint) ([]map[string]interface
 
 	// Query distinct months from tasks
 	var taskDates []time.Time
-	r.db.Model(&domain.Task{}).Where("user_id = ?", userID).Pluck("due_date", &taskDates)
+	r.db.Model(&domain.Task{}).Where("tenant_id = ?", tenantID).Pluck("due_date", &taskDates)
 	for _, d := range taskDates {
 		key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 		if _, exists := monthMap[key]; !exists && d.Year() > 2000 {
@@ -457,7 +575,7 @@ func (r *gormRepository) GetAvailableMonths(userID uint) ([]map[string]interface
 
 	// Query distinct months from transactions
 	var txDates []time.Time
-	r.db.Model(&domain.Transaction{}).Where("user_id = ?", userID).Pluck("date", &txDates)
+	r.db.Model(&domain.Transaction{}).Where("tenant_id = ?", tenantID).Pluck("date", &txDates)
 	for _, d := range txDates {
 		key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 		if _, exists := monthMap[key]; !exists && d.Year() > 2000 {
@@ -481,6 +599,13 @@ func (r *gormRepository) GetAvailableMonths(userID uint) ([]map[string]interface
 func (r *gormRepository) SeedInitialData() error {
 	// 1. Seed Default System Roles
 	defaultRoles := []domain.Role{
+		{
+			Code:        "OWNER",
+			Name:        "Owner Studio",
+			Description: "Pemilik workspace dengan hak akses penuh ke seluruh modul studio",
+			Menus:       "beranda,tugas,laporan,invoice,keuangan,pengaturan",
+			IsSystem:    true,
+		},
 		{
 			Code:        "SUPER_ADMIN",
 			Name:        "Super Admin",
@@ -524,10 +649,32 @@ func (r *gormRepository) SeedInitialData() error {
 		}
 	}
 
-	// 2. Synchronize existing users: ensure initial user is SUPER_ADMIN
-	r.db.Model(&domain.User{}).Where("role = ? OR email = ?", "CREATOR_OWNER", "reza@studio.id").Updates(map[string]interface{}{
-		"role":          "SUPER_ADMIN",
-		"allowed_menus": "beranda,tugas,laporan,invoice,keuangan,pengaturan",
+	// 2. Ensure dedicated Master Platform Super Admin exists (separate from regular tenant users)
+	var superAdmin domain.User
+	if err := r.db.Where("email = ?", "superadmin@creatortask.id").First(&superAdmin).Error; err != nil {
+		superHash, _ := security.HashPassword("password123")
+		superUser := domain.User{
+			Email:        "superadmin@creatortask.id",
+			PasswordHash: superHash,
+			Name:         "Super Admin",
+			Role:         "SUPER_ADMIN",
+			AllowedMenus: "beranda,tugas,laporan,invoice,keuangan,pengaturan",
+			TenantID:     1,
+			IsOwner:      false,
+		}
+		if err := r.db.Create(&superUser).Error; err != nil {
+			log.Printf("Warning creating super admin user: %v", err)
+		} else {
+			log.Println("[SEED] Dedicated Master 'Super Admin' account initialized (superadmin@creatortask.id)")
+		}
+	}
+
+	// 3. Ensure Reza Winata is recognized as tenant owner (regular user)
+	r.db.Model(&domain.User{}).Where("email = ?", "reza@studio.id").Updates(map[string]interface{}{
+		"is_owner":  true,
+		"role":      "OWNER",
+		"name":      "Reza Winata",
+		"tenant_id": 1,
 	})
 
 	var count int64

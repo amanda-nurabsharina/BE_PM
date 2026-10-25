@@ -20,9 +20,17 @@ import (
 type Service interface {
 	// Auth
 	Login(req dto.LoginRequest) (*dto.LoginResponse, error)
+	AdminLogin(req dto.LoginRequest) (*dto.LoginResponse, error)
 	QuickLogin(email string) (*dto.LoginResponse, error)
 	GetQuickUsers() ([]domain.User, error)
 	ChangePassword(userID uint, req dto.ChangePasswordRequest) error
+
+	// Platform & Tenant Management
+	GetTenants() ([]dto.TenantResponse, error)
+	GetTenantByID(id uint) (*dto.TenantResponse, error)
+	CreateTenant(req dto.CreateTenantRequest) (*dto.TenantResponse, error)
+	UpdateTenantStatus(id uint, req dto.UpdateTenantStatusRequest) (*dto.TenantResponse, error)
+	ResetTenantOwnerPassword(id uint, req dto.ResetTenantOwnerPasswordRequest) error
 
 	// Dashboard
 	GetDashboard(userID uint) (*dto.DashboardResponse, error)
@@ -55,7 +63,7 @@ type Service interface {
 	GetSettings(userID uint) (*domain.User, error)
 	UpdateSettings(userID uint, req dto.SettingsUpdateRequest) (*domain.User, error)
 
-	// User Management (Super Admin only)
+	// User Management (Super Admin of tenant)
 	GetUsers(requesterID uint) ([]dto.UserDetailResponse, error)
 	CreateUser(requesterID uint, req dto.UserCreateRequest) (*dto.UserDetailResponse, error)
 	UpdateUser(requesterID uint, targetUserID uint, req dto.UserUpdateRequest) (*dto.UserDetailResponse, error)
@@ -83,6 +91,14 @@ func NewService(repo repository.Repository, cfg *config.Config) Service {
 	return &serviceImpl{repo: repo, cfg: cfg}
 }
 
+func (s *serviceImpl) getTenantID(userID uint) uint {
+	user, err := s.repo.GetUserByID(userID)
+	if err == nil && user != nil && user.TenantID > 0 {
+		return user.TenantID
+	}
+	return 1
+}
+
 func (s *serviceImpl) getOwnerID(userID uint) uint {
 	user, err := s.repo.GetUserByID(userID)
 	if err == nil && user != nil && user.OwnerID != nil && *user.OwnerID > 0 {
@@ -93,7 +109,7 @@ func (s *serviceImpl) getOwnerID(userID uint) uint {
 
 func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 	var menuList []string
-	if user.Role == "SUPER_ADMIN" {
+	if user.Role == "SUPER_ADMIN" || user.Role == "OWNER" || user.IsOwner {
 		menuList = []string{"beranda", "tugas", "laporan", "invoice", "keuangan", "pengaturan"}
 	} else if user.AllowedMenus != "" {
 		for _, m := range strings.Split(user.AllowedMenus, ",") {
@@ -117,8 +133,41 @@ func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 	roleName := user.Role
 	if user.Role == "SUPER_ADMIN" {
 		roleName = "Super Admin"
+	} else if user.Role == "OWNER" || user.IsOwner {
+		roleName = "Owner Studio"
 	} else if r, err := s.repo.GetRoleByCode(user.Role); err == nil && r != nil {
 		roleName = r.Name
+	}
+
+	var tenantResp *dto.TenantResponse
+	tenantName := ""
+	tenantSlug := ""
+	if user.TenantID > 0 {
+		tenant, err := s.repo.GetTenantByID(user.TenantID)
+		if err == nil && tenant != nil {
+			tenantName = tenant.Name
+			tenantSlug = tenant.Slug
+			userCount, taskCount, _ := s.repo.GetTenantStats(tenant.ID)
+			tenantResp = &dto.TenantResponse{
+				ID:                tenant.ID,
+				Name:              tenant.Name,
+				Slug:              tenant.Slug,
+				Status:            tenant.Status,
+				CompanyAddress:    tenant.CompanyAddress,
+				Phone:             tenant.Phone,
+				NPWP:              tenant.NPWP,
+				TaxRate:           tenant.TaxRate,
+				BankName:          tenant.BankName,
+				BankAccountNumber: tenant.BankAccountNumber,
+				BankAccountHolder: tenant.BankAccountHolder,
+				OwnerID:           user.ID,
+				OwnerName:         user.Name,
+				OwnerEmail:        user.Email,
+				TotalUsers:        userCount,
+				TotalTasks:        taskCount,
+				CreatedAt:         tenant.CreatedAt.Format("2006-01-02 15:04"),
+			}
+		}
 	}
 
 	return dto.UserDetailResponse{
@@ -130,6 +179,11 @@ func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 		RoleName:     roleName,
 		AllowedMenus: menuList,
 		OwnerID:      user.OwnerID,
+		TenantID:     user.TenantID,
+		TenantSlug:   tenantSlug,
+		TenantName:   tenantName,
+		IsOwner:      user.IsOwner,
+		Tenant:       tenantResp,
 		CreatedAt:    user.CreatedAt.Format("2006-01-02 15:04"),
 	}
 }
@@ -140,8 +194,24 @@ func (s *serviceImpl) Login(req dto.LoginRequest) (*dto.LoginResponse, error) {
 		return nil, errors.New("email dan password wajib diisi")
 	}
 
-	user, err := s.repo.GetUserByEmail(req.Email)
-	if err != nil {
+	var user *domain.User
+	var err error
+
+	// If tenant slug is provided, search specifically in that tenant
+	if req.TenantSlug != "" {
+		tenant, tErr := s.repo.GetTenantBySlug(req.TenantSlug)
+		if tErr != nil || tenant == nil {
+			return nil, errors.New("tenant/workspace tidak ditemukan")
+		}
+		if tenant.Status == "suspended" {
+			return nil, errors.New("tenant/workspace ini dinonaktifkan (suspended). Hubungi administrator")
+		}
+		user, err = s.repo.GetUserByEmailAndTenant(req.Email, tenant.ID)
+	} else {
+		user, err = s.repo.GetUserByEmail(req.Email)
+	}
+
+	if err != nil || user == nil {
 		return nil, errors.New("kredensial login tidak valid")
 	}
 
@@ -149,7 +219,49 @@ func (s *serviceImpl) Login(req dto.LoginRequest) (*dto.LoginResponse, error) {
 		return nil, errors.New("kredensial login tidak valid")
 	}
 
-	token, err := security.GenerateToken(user.ID, user.Email, user.Name, user.Role, s.cfg.JWTSecret, 24*time.Hour)
+	// Super Admin cannot login via Creator Task workspace portal
+	if user.Role == "SUPER_ADMIN" {
+		return nil, errors.New("Akun Super Admin adalah akun pengelola platform SaaS. Silakan login melalui portal Master Admin (/admin/login)")
+	}
+
+	tenantSlug := ""
+	if user.TenantID > 0 {
+		tenant, tErr := s.repo.GetTenantByID(user.TenantID)
+		if tErr == nil && tenant != nil {
+			tenantSlug = tenant.Slug
+			if tenant.Status == "suspended" {
+				return nil, errors.New("tenant ini sedang dinonaktifkan (suspended). Hubungi platform administrator")
+			}
+		}
+	}
+
+	token, err := security.GenerateToken(user.ID, user.TenantID, tenantSlug, user.Email, user.Name, user.Role, s.cfg.JWTSecret, 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+
+	return &dto.LoginResponse{Token: token, User: s.toUserDetail(user)}, nil
+}
+
+func (s *serviceImpl) AdminLogin(req dto.LoginRequest) (*dto.LoginResponse, error) {
+	if req.Email == "" || req.Password == "" {
+		return nil, errors.New("email dan password wajib diisi")
+	}
+
+	user, err := s.repo.GetUserByEmail(req.Email)
+	if err != nil || user == nil {
+		return nil, errors.New("kredensial login tidak valid")
+	}
+
+	if !security.ComparePassword(req.Password, user.PasswordHash) {
+		return nil, errors.New("kredensial login tidak valid")
+	}
+
+	if user.Role != "SUPER_ADMIN" {
+		return nil, errors.New("Akses ditolak: Hanya akun Master Platform Super Admin yang dapat login ke portal ini")
+	}
+
+	token, err := security.GenerateToken(user.ID, 0, "platform-master", user.Email, user.Name, user.Role, s.cfg.JWTSecret, 24*time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +279,15 @@ func (s *serviceImpl) QuickLogin(email string) (*dto.LoginResponse, error) {
 		return nil, errors.New("profil tidak ditemukan")
 	}
 
-	token, err := security.GenerateToken(user.ID, user.Email, user.Name, user.Role, s.cfg.JWTSecret, 24*time.Hour)
+	tenantSlug := ""
+	if user.TenantID > 0 {
+		tenant, tErr := s.repo.GetTenantByID(user.TenantID)
+		if tErr == nil && tenant != nil {
+			tenantSlug = tenant.Slug
+		}
+	}
+
+	token, err := security.GenerateToken(user.ID, user.TenantID, tenantSlug, user.Email, user.Name, user.Role, s.cfg.JWTSecret, 24*time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -179,41 +299,232 @@ func (s *serviceImpl) GetQuickUsers() ([]domain.User, error) {
 	return s.repo.GetQuickUsers()
 }
 
+// Platform Tenant Management
+func (s *serviceImpl) GetTenants() ([]dto.TenantResponse, error) {
+	tenants, err := s.repo.GetTenants()
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]dto.TenantResponse, 0, len(tenants))
+	for _, t := range tenants {
+		var owner domain.User
+		s.repo.DB().Where("tenant_id = ? AND (is_owner = ? OR role = ?)", t.ID, true, "SUPER_ADMIN").Order("id asc").First(&owner)
+		userCount, taskCount, _ := s.repo.GetTenantStats(t.ID)
+
+		res = append(res, dto.TenantResponse{
+			ID:                t.ID,
+			Name:              t.Name,
+			Slug:              t.Slug,
+			Status:            t.Status,
+			CompanyAddress:    t.CompanyAddress,
+			Phone:             t.Phone,
+			NPWP:              t.NPWP,
+			TaxRate:           t.TaxRate,
+			BankName:          t.BankName,
+			BankAccountNumber: t.BankAccountNumber,
+			BankAccountHolder: t.BankAccountHolder,
+			OwnerID:           owner.ID,
+			OwnerName:         owner.Name,
+			OwnerEmail:        owner.Email,
+			TotalUsers:        userCount,
+			TotalTasks:        taskCount,
+			CreatedAt:         t.CreatedAt.Format("2006-01-02 15:04"),
+		})
+	}
+	return res, nil
+}
+
+func (s *serviceImpl) GetTenantByID(id uint) (*dto.TenantResponse, error) {
+	t, err := s.repo.GetTenantByID(id)
+	if err != nil {
+		return nil, errors.New("tenant tidak ditemukan")
+	}
+
+	var owner domain.User
+	s.repo.DB().Where("tenant_id = ? AND (is_owner = ? OR role = ?)", t.ID, true, "SUPER_ADMIN").Order("id asc").First(&owner)
+	userCount, taskCount, _ := s.repo.GetTenantStats(t.ID)
+
+	return &dto.TenantResponse{
+		ID:                t.ID,
+		Name:              t.Name,
+		Slug:              t.Slug,
+		Status:            t.Status,
+		CompanyAddress:    t.CompanyAddress,
+		Phone:             t.Phone,
+		NPWP:              t.NPWP,
+		TaxRate:           t.TaxRate,
+		BankName:          t.BankName,
+		BankAccountNumber: t.BankAccountNumber,
+		BankAccountHolder: t.BankAccountHolder,
+		OwnerID:           owner.ID,
+		OwnerName:         owner.Name,
+		OwnerEmail:        owner.Email,
+		TotalUsers:        userCount,
+		TotalTasks:        taskCount,
+		CreatedAt:         t.CreatedAt.Format("2006-01-02 15:04"),
+	}, nil
+}
+
+func (s *serviceImpl) CreateTenant(req dto.CreateTenantRequest) (*dto.TenantResponse, error) {
+	if req.Name == "" || req.Slug == "" {
+		return nil, errors.New("nama studio dan slug wajib diisi")
+	}
+	if req.OwnerName == "" || req.OwnerEmail == "" || req.OwnerPassword == "" {
+		return nil, errors.New("nama owner, email, dan password wajib diisi")
+	}
+	if len(req.OwnerPassword) < 6 {
+		return nil, errors.New("password owner minimal 6 karakter")
+	}
+
+	cleanSlug := strings.ToLower(strings.TrimSpace(req.Slug))
+	cleanSlug = strings.ReplaceAll(cleanSlug, " ", "-")
+
+	if existing, _ := s.repo.GetTenantBySlug(cleanSlug); existing != nil && existing.ID > 0 {
+		return nil, errors.New("slug subdomain/id sudah digunakan")
+	}
+
+	if existingUser, _ := s.repo.GetUserByEmail(req.OwnerEmail); existingUser != nil && existingUser.ID > 0 {
+		return nil, errors.New("email owner sudah terdaftar di sistem")
+	}
+
+	hashedPassword, err := security.HashPassword(req.OwnerPassword)
+	if err != nil {
+		return nil, errors.New("gagal mengenkripsi password")
+	}
+
+	taxRate := req.TaxRate
+	if taxRate <= 0 {
+		taxRate = 11.0
+	}
+
+	tenant := domain.Tenant{
+		Name:              req.Name,
+		Slug:              cleanSlug,
+		Status:            "active",
+		CompanyAddress:    req.CompanyAddress,
+		Phone:             req.Phone,
+		NPWP:              req.NPWP,
+		TaxRate:           taxRate,
+		BankName:          req.BankName,
+		BankAccountNumber: req.BankAccountNumber,
+		BankAccountHolder: req.BankAccountHolder,
+	}
+
+	err = s.repo.DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&tenant).Error; err != nil {
+			return err
+		}
+
+		owner := domain.User{
+			TenantID:          tenant.ID,
+			IsOwner:           true,
+			Email:             req.OwnerEmail,
+			PasswordHash:      hashedPassword,
+			Name:              req.OwnerName,
+			Role:              "OWNER",
+			AllowedMenus:      "beranda,tugas,laporan,invoice,keuangan,pengaturan",
+			Company:           req.Name,
+			CompanyAddress:    req.CompanyAddress,
+			Phone:             req.Phone,
+			NPWP:              req.NPWP,
+			TaxRate:           taxRate,
+			BankName:          req.BankName,
+			BankAccountNumber: req.BankAccountNumber,
+			BankAccountHolder: req.BankAccountHolder,
+		}
+
+		if err := tx.Create(&owner).Error; err != nil {
+			return err
+		}
+
+		tx.Create(&domain.AuditLog{
+			TenantID:  tenant.ID,
+			UserID:    owner.ID,
+			Actor:     "Platform Admin",
+			Module:    "Tenant",
+			Action:    "CREATE_TENANT",
+			Title:     fmt.Sprintf("Inisialisasi Tenant Baru: %s", tenant.Name),
+			Detail:    fmt.Sprintf("Owner: %s (%s), Slug: %s", owner.Name, owner.Email, tenant.Slug),
+			CreatedAt: time.Now(),
+		})
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return s.GetTenantByID(tenant.ID)
+}
+
+func (s *serviceImpl) UpdateTenantStatus(id uint, req dto.UpdateTenantStatusRequest) (*dto.TenantResponse, error) {
+	if req.Status != "active" && req.Status != "suspended" {
+		return nil, errors.New("status tidak valid (harus 'active' atau 'suspended')")
+	}
+
+	if err := s.repo.UpdateTenantStatus(id, req.Status); err != nil {
+		return nil, err
+	}
+
+	return s.GetTenantByID(id)
+}
+
+func (s *serviceImpl) ResetTenantOwnerPassword(id uint, req dto.ResetTenantOwnerPasswordRequest) error {
+	if len(req.NewPassword) < 6 {
+		return errors.New("password baru minimal 6 karakter")
+	}
+
+	var owner domain.User
+	if err := s.repo.DB().Where("tenant_id = ? AND (is_owner = ? OR role = ?)", id, true, "SUPER_ADMIN").Order("id asc").First(&owner).Error; err != nil {
+		return errors.New("owner untuk tenant ini tidak ditemukan")
+	}
+
+	newHash, err := security.HashPassword(req.NewPassword)
+	if err != nil {
+		return errors.New("gagal mengenkripsi password")
+	}
+
+	return s.repo.UpdatePassword(owner.ID, newHash)
+}
+
 // Dashboard
 func (s *serviceImpl) GetDashboard(userID uint) (*dto.DashboardResponse, error) {
 	now := time.Now()
 	currentMonth := int(now.Month())
 	currentYear := now.Year()
+	tenantID := s.getTenantID(userID)
 
 	// 1. All-time cash balance & current month cashflow
-	allIncome, _, allNet, err := s.repo.GetCashflowSummary(userID, 0, 0)
+	allIncome, _, allNet, err := s.repo.GetCashflowSummary(tenantID, 0, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	mIncome, mExpense, mNet, err := s.repo.GetCashflowSummary(userID, currentMonth, currentYear)
+	mIncome, mExpense, mNet, err := s.repo.GetCashflowSummary(tenantID, currentMonth, currentYear)
 	if err != nil {
 		return nil, err
 	}
 
 	// 2. Unpaid invoices
-	unpaidCount, unpaidSum, err := s.repo.GetUnpaidInvoicesCount(userID)
+	unpaidCount, unpaidSum, err := s.repo.GetUnpaidInvoicesCount(tenantID)
 	if err != nil {
 		return nil, err
 	}
 
 	// 3. Active tasks count
 	var activeTasksCount int64
-	s.repo.DB().Model(&domain.Task{}).Where("user_id = ? AND status != ?", userID, "paid").Count(&activeTasksCount)
+	s.repo.DB().Model(&domain.Task{}).Where("tenant_id = ? AND status != ?", tenantID, "paid").Count(&activeTasksCount)
 
 	// 4. Top 2 agenda tasks
 	var topTasks []domain.Task
-	s.repo.DB().Where("user_id = ? AND status != ?", userID, "paid").
+	s.repo.DB().Where("tenant_id = ? AND status != ?", tenantID, "paid").
 		Order("due_date asc, id desc").Limit(2).Find(&topTasks)
 
 	// 5. Up to 2 pending invoices
 	var pendingInvoices []domain.Invoice
-	s.repo.DB().Where("user_id = ? AND status != ?", userID, "paid").
+	s.repo.DB().Where("tenant_id = ? AND status != ?", tenantID, "paid").
 		Order("due_date asc, id desc").Limit(2).Find(&pendingInvoices)
 
 	// BR-17: Hero Card Angka Utama = Total Pemasukan Kas + Nilai Invoice Menunggu Pembayaran
@@ -243,8 +554,9 @@ func (s *serviceImpl) GetTasks(userID uint, month, year int, taskType, status st
 	if limit <= 0 {
 		limit = 4 // BR-01: Maksimal 4 per halaman
 	}
+	tenantID := s.getTenantID(userID)
 
-	tasks, total, err := s.repo.GetTasks(userID, month, year, taskType, status, page, limit)
+	tasks, total, err := s.repo.GetTasks(tenantID, month, year, taskType, status, page, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +578,8 @@ func (s *serviceImpl) GetTasks(userID uint, month, year int, taskType, status st
 }
 
 func (s *serviceImpl) GetTaskByID(userID, taskID uint) (*domain.Task, error) {
-	return s.repo.GetTaskByID(userID, taskID)
+	tenantID := s.getTenantID(userID)
+	return s.repo.GetTaskByID(tenantID, taskID)
 }
 
 func (s *serviceImpl) CreateTask(userID uint, req dto.TaskCreateRequest) (*domain.Task, error) {
@@ -299,7 +612,9 @@ func (s *serviceImpl) CreateTask(userID uint, req dto.TaskCreateRequest) (*domai
 		}
 	}
 
+	tenantID := s.getTenantID(userID)
 	task := &domain.Task{
+		TenantID:       tenantID,
 		UserID:         userID,
 		Type:           req.Type,
 		Title:          req.Title,
@@ -328,6 +643,7 @@ func (s *serviceImpl) CreateTask(userID uint, req dto.TaskCreateRequest) (*domai
 		actor = user.Name
 	}
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Actor:     actor,
 		Module:    "Tugas",
@@ -341,7 +657,8 @@ func (s *serviceImpl) CreateTask(userID uint, req dto.TaskCreateRequest) (*domai
 }
 
 func (s *serviceImpl) UpdateTaskStatus(userID, taskID uint, status string) (*domain.Task, error) {
-	task, err := s.repo.GetTaskByID(userID, taskID)
+	tenantID := s.getTenantID(userID)
+	task, err := s.repo.GetTaskByID(tenantID, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +680,7 @@ func (s *serviceImpl) UpdateTaskStatus(userID, taskID uint, status string) (*dom
 		actor = user.Name
 	}
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Actor:     actor,
 		Module:    "Tugas",
@@ -376,15 +694,17 @@ func (s *serviceImpl) UpdateTaskStatus(userID, taskID uint, status string) (*dom
 }
 
 func (s *serviceImpl) ToggleChecklistItem(userID, taskID, itemID uint) (*domain.ChecklistItem, error) {
-	return s.repo.ToggleChecklistItem(userID, taskID, itemID)
+	tenantID := s.getTenantID(userID)
+	return s.repo.ToggleChecklistItem(tenantID, taskID, itemID)
 }
 
 func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmationRequest) error {
+	tenantID := s.getTenantID(userID)
 	return s.repo.DB().Transaction(func(tx *gorm.DB) error {
 		// 1. Lock and fetch task
 		var task domain.Task
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
+			Where("id = ? AND tenant_id = ?", taskID, tenantID).First(&task).Error; err != nil {
 			return err
 		}
 
@@ -400,13 +720,13 @@ func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmat
 		// 2. Link or Auto-generate Invoice (BR-06)
 		var invoice domain.Invoice
 		if task.RelatedInvoiceID != nil {
-			if err := tx.Where("id = ? AND user_id = ?", *task.RelatedInvoiceID, userID).First(&invoice).Error; err != nil {
+			if err := tx.Where("id = ? AND tenant_id = ?", *task.RelatedInvoiceID, tenantID).First(&invoice).Error; err != nil {
 				return err
 			}
 		} else {
 			// Generate invoice number
 			year := time.Now().Year()
-			seq, err := s.repo.NextInvoiceSequence(tx, year, "ENDORSE")
+			seq, err := s.repo.NextInvoiceSequence(tx, tenantID, year, "ENDORSE")
 			if err != nil {
 				return err
 			}
@@ -418,6 +738,7 @@ func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmat
 			grandTotal := subtotal + taxAmount
 
 			invoice = domain.Invoice{
+				TenantID:      tenantID,
 				UserID:        userID,
 				RelatedTaskID: &task.ID,
 				InvoiceNumber: invNumber,
@@ -457,6 +778,7 @@ func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmat
 
 		// 4. Automatically Book Cashflow Income (BR-07, BR-08, BR-09)
 		cashflow := domain.Transaction{
+			TenantID:         tenantID,
 			UserID:           userID,
 			RelatedInvoiceID: &invoice.ID,
 			Type:             "income",
@@ -473,40 +795,45 @@ func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmat
 
 		// 5. Audit Log (Lampiran A)
 		audit := domain.AuditLog{
+			TenantID:  tenantID,
 			UserID:    userID,
 			Actor:     userSetting.Name,
 			Module:    "Tugas",
 			Action:    "MARK_PAID",
 			Title:     fmt.Sprintf("Pelunasan Tugas %s", task.Title),
-			Detail:    fmt.Sprintf("Pelunasan invoice %s senilai Rp %d dan pencatatan kas otomatis", invoice.InvoiceNumber, invoice.GrandTotal),
+			Detail:    fmt.Sprintf("Tugas senilai Rp %d telah dilunasi beserta invoice %s", task.FeeOrValue, invoice.InvoiceNumber),
 			CreatedAt: time.Now(),
 		}
-		return tx.Create(&audit).Error
+		if err := tx.Create(&audit).Error; err != nil {
+			return err
+		}
+
+		return nil
 	})
 }
 
 func (s *serviceImpl) DeleteTask(userID, taskID uint) error {
-	task, err := s.repo.GetTaskByID(userID, taskID)
+	tenantID := s.getTenantID(userID)
+	task, err := s.repo.GetTaskByID(tenantID, taskID)
 	if err != nil {
 		return err
 	}
 
-	// Delete protection: Cannot delete if paid
 	if task.Status == "paid" {
-		return errors.New("tugas yang sudah lunas tidak dapat dihapus untuk melindungi integritas kas")
+		return errors.New("tugas yang sudah lunas tidak dapat dihapus")
 	}
 
-	// If linked to an unpaid invoice, detach or delete draft invoice
+	// Delete related draft/unpaid invoice if created automatically
 	if task.RelatedInvoiceID != nil {
 		var inv domain.Invoice
-		if err := s.repo.DB().Where("id = ? AND user_id = ?", *task.RelatedInvoiceID, userID).First(&inv).Error; err == nil {
+		if err := s.repo.DB().Where("id = ? AND tenant_id = ?", *task.RelatedInvoiceID, tenantID).First(&inv).Error; err == nil {
 			if inv.Status != "paid" {
 				_ = s.repo.DB().Delete(&inv)
 			}
 		}
 	}
 
-	if err := s.repo.DeleteTask(userID, taskID); err != nil {
+	if err := s.repo.DeleteTask(tenantID, taskID); err != nil {
 		return err
 	}
 
@@ -516,6 +843,7 @@ func (s *serviceImpl) DeleteTask(userID, taskID uint) error {
 		actor = user.Name
 	}
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Actor:     actor,
 		Module:    "Tugas",
@@ -536,8 +864,9 @@ func (s *serviceImpl) GetInvoices(userID uint, month, year int, status string, p
 	if limit <= 0 {
 		limit = 4 // BR-01
 	}
+	tenantID := s.getTenantID(userID)
 
-	invoices, total, err := s.repo.GetInvoices(userID, month, year, status, page, limit)
+	invoices, total, err := s.repo.GetInvoices(tenantID, month, year, status, page, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -547,7 +876,7 @@ func (s *serviceImpl) GetInvoices(userID uint, month, year int, status string, p
 		totalPages = 1
 	}
 
-	unpaidCount, _, _ := s.repo.GetUnpaidInvoicesCount(userID)
+	unpaidCount, _, _ := s.repo.GetUnpaidInvoicesCount(tenantID)
 
 	return map[string]interface{}{
 		"items": invoices,
@@ -562,7 +891,8 @@ func (s *serviceImpl) GetInvoices(userID uint, month, year int, status string, p
 }
 
 func (s *serviceImpl) GetInvoiceByID(userID, invoiceID uint) (*domain.Invoice, error) {
-	return s.repo.GetInvoiceByID(userID, invoiceID)
+	tenantID := s.getTenantID(userID)
+	return s.repo.GetInvoiceByID(tenantID, invoiceID)
 }
 
 func (s *serviceImpl) CreateInvoice(userID uint, req dto.InvoiceCreateRequest) (*domain.Invoice, error) {
@@ -605,14 +935,16 @@ func (s *serviceImpl) CreateInvoice(userID uint, req dto.InvoiceCreateRequest) (
 	}
 	grandTotal := subtotal + taxAmount
 
+	tenantID := s.getTenantID(userID)
 	year := time.Now().Year()
-	seq, err := s.repo.NextInvoiceSequence(s.repo.DB(), year, "ENDORSE")
+	seq, err := s.repo.NextInvoiceSequence(s.repo.DB(), tenantID, year, "ENDORSE")
 	if err != nil {
 		return nil, err
 	}
 	invNumber := fmt.Sprintf("INV/ENDORSE/%d/%03d", year, seq)
 
 	invoice := &domain.Invoice{
+		TenantID:      tenantID,
 		UserID:        userID,
 		RelatedTaskID: req.RelatedTaskID,
 		InvoiceNumber: invNumber,
@@ -637,6 +969,7 @@ func (s *serviceImpl) CreateInvoice(userID uint, req dto.InvoiceCreateRequest) (
 
 	// Audit Log
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Actor:     userSetting.Name,
 		Module:    "Invoice",
@@ -650,7 +983,8 @@ func (s *serviceImpl) CreateInvoice(userID uint, req dto.InvoiceCreateRequest) (
 }
 
 func (s *serviceImpl) ToggleInvoiceTax(userID, invoiceID uint) (*domain.Invoice, error) {
-	inv, err := s.repo.GetInvoiceByID(userID, invoiceID)
+	tenantID := s.getTenantID(userID)
+	inv, err := s.repo.GetInvoiceByID(tenantID, invoiceID)
 	if err != nil {
 		return nil, err
 	}
@@ -679,6 +1013,7 @@ func (s *serviceImpl) ToggleInvoiceTax(userID, invoiceID uint) (*domain.Invoice,
 		actor = userSetting.Name
 	}
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Actor:     actor,
 		Module:    "Invoice",
@@ -692,10 +1027,11 @@ func (s *serviceImpl) ToggleInvoiceTax(userID, invoiceID uint) (*domain.Invoice,
 }
 
 func (s *serviceImpl) MarkInvoicePaid(userID, invoiceID uint, req dto.PaymentConfirmationRequest) error {
+	tenantID := s.getTenantID(userID)
 	return s.repo.DB().Transaction(func(tx *gorm.DB) error {
 		var inv domain.Invoice
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ? AND user_id = ?", invoiceID, userID).First(&inv).Error; err != nil {
+			Where("id = ? AND tenant_id = ?", invoiceID, tenantID).First(&inv).Error; err != nil {
 			return err
 		}
 
@@ -713,7 +1049,7 @@ func (s *serviceImpl) MarkInvoicePaid(userID, invoiceID uint, req dto.PaymentCon
 		// Synchronize related task if exists
 		if inv.RelatedTaskID != nil {
 			var task domain.Task
-			if err := tx.Where("id = ? AND user_id = ?", *inv.RelatedTaskID, userID).First(&task).Error; err == nil {
+			if err := tx.Where("id = ? AND tenant_id = ?", *inv.RelatedTaskID, tenantID).First(&task).Error; err == nil {
 				task.Status = "paid"
 				task.PaymentProofURL = req.PaymentProofURL
 				task.PaymentProofName = req.PaymentProofName
@@ -723,6 +1059,7 @@ func (s *serviceImpl) MarkInvoicePaid(userID, invoiceID uint, req dto.PaymentCon
 
 		// Book cashflow entry (BR-07, BR-08, BR-09)
 		cashflow := domain.Transaction{
+			TenantID:         tenantID,
 			UserID:           userID,
 			RelatedInvoiceID: &inv.ID,
 			Type:             "income",
@@ -743,6 +1080,7 @@ func (s *serviceImpl) MarkInvoicePaid(userID, invoiceID uint, req dto.PaymentCon
 			actor = userSetting.Name
 		}
 		_ = tx.Create(&domain.AuditLog{
+			TenantID:  tenantID,
 			UserID:    userID,
 			Actor:     actor,
 			Module:    "Invoice",
@@ -764,13 +1102,14 @@ func (s *serviceImpl) GetCashflow(userID uint, month, year int, txType string, p
 	if limit <= 0 {
 		limit = 4 // BR-01
 	}
+	tenantID := s.getTenantID(userID)
 
-	txs, total, err := s.repo.GetTransactions(userID, month, year, txType, page, limit)
+	txs, total, err := s.repo.GetTransactions(tenantID, month, year, txType, page, limit)
 	if err != nil {
 		return nil, err
 	}
 
-	income, expense, net, _ := s.repo.GetCashflowSummary(userID, month, year)
+	income, expense, net, _ := s.repo.GetCashflowSummary(tenantID, month, year)
 
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 	if totalPages == 0 {
@@ -806,7 +1145,9 @@ func (s *serviceImpl) CreateTransaction(userID uint, req dto.TransactionCreateRe
 		date = time.Now()
 	}
 
+	tenantID := s.getTenantID(userID)
 	tx := &domain.Transaction{
+		TenantID:       tenantID,
 		UserID:         userID,
 		Type:           req.Type,
 		Amount:         req.Amount,
@@ -831,6 +1172,7 @@ func (s *serviceImpl) CreateTransaction(userID uint, req dto.TransactionCreateRe
 		action = "CREATE_INCOME"
 	}
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Actor:     actor,
 		Module:    "Keuangan",
@@ -844,7 +1186,8 @@ func (s *serviceImpl) CreateTransaction(userID uint, req dto.TransactionCreateRe
 }
 
 func (s *serviceImpl) DeleteTransaction(userID, txID uint) error {
-	return s.repo.DeleteTransaction(userID, txID)
+	tenantID := s.getTenantID(userID)
+	return s.repo.DeleteTransaction(tenantID, txID)
 }
 
 // Reports
@@ -855,6 +1198,7 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 	if limit <= 0 {
 		limit = 4 // BR-01
 	}
+	tenantID := s.getTenantID(userID)
 
 	monthNames := []string{
 		"", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -868,9 +1212,9 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 		periodLabel = fmt.Sprintf("Tahun %d", year)
 	}
 
-	// Fetch all tasks for report according to period
+	// Fetch all tasks for report according to period and tenant
 	var tasks []domain.Task
-	tq := s.repo.DB().Where("user_id = ?", userID)
+	tq := s.repo.DB().Where("tenant_id = ?", tenantID)
 	if year > 0 && month > 0 {
 		startDate := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 		endDate := startDate.AddDate(0, 1, 0)
@@ -927,7 +1271,7 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 		} else if t.Type == "endorse" {
 			if t.RelatedInvoiceID != nil {
 				var inv domain.Invoice
-				if err := s.repo.DB().First(&inv, *t.RelatedInvoiceID).Error; err == nil {
+				if err := s.repo.DB().Where("id = ? AND tenant_id = ?", *t.RelatedInvoiceID, tenantID).First(&inv).Error; err == nil {
 					invNumber = inv.InvoiceNumber
 					val = inv.GrandTotal // BR-14: include PPN
 					if inv.Status == "paid" {
@@ -1053,7 +1397,41 @@ func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest)
 		return nil, err
 	}
 
+	tenantID := s.getTenantID(userID)
+	// Also sync tenant company/tax info if this user is the owner
+	if user.IsOwner && user.TenantID > 0 {
+		tenant, tErr := s.repo.GetTenantByID(user.TenantID)
+		if tErr == nil && tenant != nil {
+			if req.Company != "" {
+				tenant.Name = req.Company
+			}
+			if req.CompanyAddress != "" {
+				tenant.CompanyAddress = req.CompanyAddress
+			}
+			if req.Phone != "" {
+				tenant.Phone = req.Phone
+			}
+			if req.NPWP != "" {
+				tenant.NPWP = req.NPWP
+			}
+			if req.TaxRate >= 0 && req.TaxRate <= 100 {
+				tenant.TaxRate = req.TaxRate
+			}
+			if req.BankName != "" {
+				tenant.BankName = req.BankName
+			}
+			if req.BankAccountNumber != "" {
+				tenant.BankAccountNumber = req.BankAccountNumber
+			}
+			if req.BankAccountHolder != "" {
+				tenant.BankAccountHolder = req.BankAccountHolder
+			}
+			_ = s.repo.UpdateTenant(tenant)
+		}
+	}
+
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Actor:     user.Name,
 		Module:    "Setting",
@@ -1074,8 +1452,9 @@ func (s *serviceImpl) GetAuditLogs(userID uint, module, search string, page, lim
 	if limit <= 0 {
 		limit = 10
 	}
+	tenantID := s.getTenantID(userID)
 
-	logs, total, err := s.repo.GetAuditLogs(userID, module, search, page, limit)
+	logs, total, err := s.repo.GetAuditLogs(tenantID, module, search, page, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,7 +1476,8 @@ func (s *serviceImpl) GetAuditLogs(userID uint, module, search string, page, lim
 }
 
 func (s *serviceImpl) GetAvailableMonths(userID uint) ([]map[string]interface{}, error) {
-	return s.repo.GetAvailableMonths(userID)
+	tenantID := s.getTenantID(userID)
+	return s.repo.GetAvailableMonths(tenantID)
 }
 
 // Change Password
@@ -1127,8 +1507,10 @@ func (s *serviceImpl) ChangePassword(userID uint, req dto.ChangePasswordRequest)
 		return err
 	}
 
+	tenantID := s.getTenantID(userID)
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
-		UserID:    s.getOwnerID(userID),
+		TenantID:  tenantID,
+		UserID:    userID,
 		Actor:     user.Name,
 		Module:    "Setting",
 		Action:    "CHANGE_PASSWORD",
@@ -1140,21 +1522,25 @@ func (s *serviceImpl) ChangePassword(userID uint, req dto.ChangePasswordRequest)
 	return nil
 }
 
-// User Management (Super Admin only)
+// User Management (Owner of tenant or Super Admin)
 func (s *serviceImpl) GetUsers(requesterID uint) ([]dto.UserDetailResponse, error) {
 	reqUser, err := s.repo.GetUserByID(requesterID)
-	if err != nil || reqUser.Role != "SUPER_ADMIN" {
-		return nil, errors.New("hanya Super Admin yang memiliki hak akses mengelola pengguna")
+	if err != nil || (!reqUser.IsOwner && reqUser.Role != "OWNER" && reqUser.Role != "SUPER_ADMIN") {
+		return nil, errors.New("hanya Owner Studio atau Super Admin yang memiliki hak akses mengelola pengguna")
 	}
 
-	ownerID := s.getOwnerID(requesterID)
-	users, err := s.repo.GetUsers(ownerID)
+	tenantID := s.getTenantID(requesterID)
+	users, err := s.repo.GetUsers(tenantID)
 	if err != nil {
 		return nil, err
 	}
 
 	res := make([]dto.UserDetailResponse, 0, len(users))
 	for _, u := range users {
+		// Do not expose platform Super Admin in tenant's user management list
+		if u.Email == "superadmin@creatortask.id" || u.Role == "SUPER_ADMIN" {
+			continue
+		}
 		userCopy := u
 		res = append(res, s.toUserDetail(&userCopy))
 	}
@@ -1164,8 +1550,12 @@ func (s *serviceImpl) GetUsers(requesterID uint) ([]dto.UserDetailResponse, erro
 
 func (s *serviceImpl) CreateUser(requesterID uint, req dto.UserCreateRequest) (*dto.UserDetailResponse, error) {
 	reqUser, err := s.repo.GetUserByID(requesterID)
-	if err != nil || reqUser.Role != "SUPER_ADMIN" {
-		return nil, errors.New("hanya Super Admin yang berwenang menambahkan pengguna baru")
+	if err != nil || (!reqUser.IsOwner && reqUser.Role != "OWNER" && reqUser.Role != "SUPER_ADMIN") {
+		return nil, errors.New("hanya Owner Studio atau Super Admin yang berwenang menambahkan pengguna baru")
+	}
+
+	if req.Role == "SUPER_ADMIN" {
+		return nil, errors.New("role Super Admin hanya khusus untuk Platform Admin")
 	}
 
 	if req.Email == "" || req.Name == "" || req.Password == "" {
@@ -1176,8 +1566,9 @@ func (s *serviceImpl) CreateUser(requesterID uint, req dto.UserCreateRequest) (*
 		return nil, errors.New("password minimal 6 karakter")
 	}
 
-	if existing, _ := s.repo.GetUserByEmail(req.Email); existing != nil && existing.ID > 0 {
-		return nil, errors.New("email sudah terdaftar dalam sistem")
+	tenantID := s.getTenantID(requesterID)
+	if existing, _ := s.repo.GetUserByEmailAndTenant(req.Email, tenantID); existing != nil && existing.ID > 0 {
+		return nil, errors.New("email sudah terdaftar dalam workspace ini")
 	}
 
 	roleCode := req.Role
@@ -1186,7 +1577,7 @@ func (s *serviceImpl) CreateUser(requesterID uint, req dto.UserCreateRequest) (*
 	}
 
 	menusStr := strings.Join(req.AllowedMenus, ",")
-	if roleCode == "SUPER_ADMIN" {
+	if roleCode == "SUPER_ADMIN" || roleCode == "OWNER" {
 		menusStr = "beranda,tugas,laporan,invoice,keuangan,pengaturan"
 	}
 
@@ -1197,6 +1588,8 @@ func (s *serviceImpl) CreateUser(requesterID uint, req dto.UserCreateRequest) (*
 	}
 
 	newUser := domain.User{
+		TenantID:          tenantID,
+		IsOwner:           false,
 		Email:             req.Email,
 		PasswordHash:      hashed,
 		Name:              req.Name,
@@ -1219,6 +1612,7 @@ func (s *serviceImpl) CreateUser(requesterID uint, req dto.UserCreateRequest) (*
 	}
 
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    ownerID,
 		Actor:     reqUser.Name,
 		Module:    "Setting",
@@ -1234,8 +1628,12 @@ func (s *serviceImpl) CreateUser(requesterID uint, req dto.UserCreateRequest) (*
 
 func (s *serviceImpl) UpdateUser(requesterID uint, targetUserID uint, req dto.UserUpdateRequest) (*dto.UserDetailResponse, error) {
 	reqUser, err := s.repo.GetUserByID(requesterID)
-	if err != nil || reqUser.Role != "SUPER_ADMIN" {
-		return nil, errors.New("hanya Super Admin yang berwenang mengubah data pengguna")
+	if err != nil || (!reqUser.IsOwner && reqUser.Role != "OWNER" && reqUser.Role != "SUPER_ADMIN") {
+		return nil, errors.New("hanya Owner Studio atau Super Admin yang berwenang mengubah data pengguna")
+	}
+
+	if req.Role == "SUPER_ADMIN" {
+		return nil, errors.New("role Super Admin hanya khusus untuk Platform Admin")
 	}
 
 	target, err := s.repo.GetUserByID(targetUserID)
@@ -1243,12 +1641,17 @@ func (s *serviceImpl) UpdateUser(requesterID uint, targetUserID uint, req dto.Us
 		return nil, errors.New("pengguna tidak ditemukan")
 	}
 
+	tenantID := s.getTenantID(requesterID)
+	if target.TenantID != tenantID {
+		return nil, errors.New("akses ditolak: pengguna tidak berada di workspace Anda")
+	}
+
 	if req.Name != "" {
 		target.Name = req.Name
 	}
 	if req.Email != "" && req.Email != target.Email {
-		if ex, _ := s.repo.GetUserByEmail(req.Email); ex != nil && ex.ID != target.ID {
-			return nil, errors.New("email sudah digunakan oleh pengguna lain")
+		if ex, _ := s.repo.GetUserByEmailAndTenant(req.Email, tenantID); ex != nil && ex.ID != target.ID {
+			return nil, errors.New("email sudah digunakan oleh pengguna lain di workspace ini")
 		}
 		target.Email = req.Email
 	}
@@ -1265,9 +1668,9 @@ func (s *serviceImpl) UpdateUser(requesterID uint, targetUserID uint, req dto.Us
 		}
 	}
 
-	// Super Admin primary owner cannot have role revoked
-	if target.OwnerID == nil && target.Role == "SUPER_ADMIN" {
-		target.Role = "SUPER_ADMIN"
+	// Owner primary user cannot have role revoked
+	if target.IsOwner || target.Role == "OWNER" {
+		target.Role = "OWNER"
 		target.AllowedMenus = "beranda,tugas,laporan,invoice,keuangan,pengaturan"
 	} else {
 		if req.Role != "" {
@@ -1283,6 +1686,7 @@ func (s *serviceImpl) UpdateUser(requesterID uint, targetUserID uint, req dto.Us
 	}
 
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    s.getOwnerID(requesterID),
 		Actor:     reqUser.Name,
 		Module:    "Setting",
@@ -1298,8 +1702,8 @@ func (s *serviceImpl) UpdateUser(requesterID uint, targetUserID uint, req dto.Us
 
 func (s *serviceImpl) DeleteUser(requesterID uint, targetUserID uint) error {
 	reqUser, err := s.repo.GetUserByID(requesterID)
-	if err != nil || reqUser.Role != "SUPER_ADMIN" {
-		return errors.New("hanya Super Admin yang berwenang menghapus pengguna")
+	if err != nil || (!reqUser.IsOwner && reqUser.Role != "OWNER" && reqUser.Role != "SUPER_ADMIN") {
+		return errors.New("hanya Owner Studio atau Super Admin yang berwenang menghapus pengguna")
 	}
 
 	if requesterID == targetUserID {
@@ -1311,8 +1715,13 @@ func (s *serviceImpl) DeleteUser(requesterID uint, targetUserID uint) error {
 		return errors.New("pengguna tidak ditemukan")
 	}
 
-	if target.OwnerID == nil && target.Role == "SUPER_ADMIN" {
-		return errors.New("akun utama Super Admin tidak dapat dihapus")
+	tenantID := s.getTenantID(requesterID)
+	if target.TenantID != tenantID {
+		return errors.New("akses ditolak: pengguna tidak berada di workspace Anda")
+	}
+
+	if target.IsOwner || target.Role == "OWNER" {
+		return errors.New("akun utama Owner Studio tidak dapat dihapus")
 	}
 
 	if err := s.repo.DeleteUser(targetUserID); err != nil {
@@ -1320,6 +1729,7 @@ func (s *serviceImpl) DeleteUser(requesterID uint, targetUserID uint) error {
 	}
 
 	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
 		UserID:    s.getOwnerID(requesterID),
 		Actor:     reqUser.Name,
 		Module:    "Setting",

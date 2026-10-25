@@ -51,6 +51,11 @@ func main() {
 	}
 	log.Println("Database tables migration completed successfully")
 
+	// Multi-tenant Auto Migration (ensures default tenant exists and links unassigned data safely)
+	if err := repo.AutoMigrateMultiTenant(); err != nil {
+		log.Printf("Warning during multi-tenant auto-migration: %v", err)
+	}
+
 	// Seed Initial Setup (Roles and initial super admin account if needed)
 	if err := repo.SeedInitialData(); err != nil {
 		log.Printf("Warning during initial seeding: %v", err)
@@ -78,6 +83,7 @@ func main() {
 	settingHandler := handler.NewSettingHandler(svc)
 	auditHandler := handler.NewAuditHandler(svc)
 	uploadHandler := handler.NewUploadHandler(cfg.UploadDir)
+	tenantHandler := handler.NewTenantHandler(svc)
 
 	// Fiber Engine Setup with 2MB Body Limit for Upload Protection
 	app := fiber.New(fiber.Config{
@@ -160,6 +166,16 @@ func main() {
 
 	// Audit Logs (Immutable Query Only)
 	creator.Get("/audit-logs", auditHandler.GetAuditLogs)
+
+	// 3. PLATFORM & TENANT MANAGEMENT ROUTES
+	api.Post("/platform/login", middleware.SetupAuthRateLimiter(), tenantHandler.AdminLogin)
+
+	platform := api.Group("/platform", middleware.RequireJWT(cfg.JWTSecret))
+	platform.Get("/tenants", tenantHandler.GetTenants)
+	platform.Post("/tenants", tenantHandler.CreateTenant)
+	platform.Get("/tenants/:id", tenantHandler.GetTenantByID)
+	platform.Put("/tenants/:id/status", tenantHandler.UpdateTenantStatus)
+	platform.Post("/tenants/:id/reset-password", tenantHandler.ResetTenantOwnerPassword)
 
 	// Start Server
 	listenAddr := fmt.Sprintf(":%s", cfg.AppPort)

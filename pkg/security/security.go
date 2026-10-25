@@ -10,10 +10,12 @@ import (
 )
 
 type JWTClaims struct {
-	UserID uint   `json:"user_id"`
-	Email  string `json:"email"`
-	Name   string `json:"name"`
-	Role   string `json:"role"`
+	UserID     uint   `json:"user_id"`
+	TenantID   uint   `json:"tenant_id"`
+	TenantSlug string `json:"tenant_slug"`
+	Email      string `json:"email"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -32,17 +34,19 @@ func ConstantTimeCompare(a, b string) bool {
 }
 
 // GenerateToken generates access token with 24 hours validity (production secure)
-func GenerateToken(userID uint, email, name, role, secret string, duration time.Duration) (string, error) {
+func GenerateToken(userID, tenantID uint, tenantSlug, email, name, role, secret string, duration time.Duration) (string, error) {
 	if duration <= 0 {
 		duration = 24 * time.Hour
 	}
 	expiresAt := time.Now().Add(duration)
 
 	claims := JWTClaims{
-		UserID: userID,
-		Email:  email,
-		Name:   name,
-		Role:   role,
+		UserID:     userID,
+		TenantID:   tenantID,
+		TenantSlug: tenantSlug,
+		Email:      email,
+		Name:       name,
+		Role:       role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
