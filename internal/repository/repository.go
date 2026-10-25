@@ -563,8 +563,14 @@ func (r *gormRepository) SeedInitialData() error {
 }
 
 // CleanSampleData purges mock sample tasks, invoices, transactions, and audit logs.
+// Only executes when RUN_SAMPLE_CLEANUP="true" is explicitly configured in environment.
 // All user login accounts and system/custom roles are 100% preserved.
 func (r *gormRepository) CleanSampleData() error {
+	if os.Getenv("RUN_SAMPLE_CLEANUP") != "true" {
+		log.Println("[CLEANUP] CleanSampleData skipped: RUN_SAMPLE_CLEANUP is not set to 'true'. Existing data is protected.")
+		return nil
+	}
+
 	// 1. Break foreign key references between tasks and invoices
 	r.db.Exec(`UPDATE tasks SET related_invoice_id = NULL WHERE brand IN ('Somethinc Official', 'Erha Skincare', 'Scarlett Whitening', 'Internal Studio')`)
 	r.db.Exec(`UPDATE invoices SET related_task_id = NULL WHERE invoice_number LIKE 'INV/%/2026/%'`)

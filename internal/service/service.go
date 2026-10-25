@@ -906,7 +906,7 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 		DueDate          string `json:"due_date"`
 	}
 
-	var rows []ReportRow
+	rows := make([]ReportRow, 0)
 	var totalFee int64
 	var totalPaid int64
 	var totalUnpaid int64
@@ -982,7 +982,10 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 	if end > len(rows) {
 		end = len(rows)
 	}
-	pagedRows := rows[start:end]
+	pagedRows := make([]ReportRow, 0)
+	if start < len(rows) {
+		pagedRows = rows[start:end]
+	}
 
 	return &dto.ReportResponse{
 		PeriodLabel:     periodLabel,

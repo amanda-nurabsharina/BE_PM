@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"be-pm/config"
 	"be-pm/internal/handler"
@@ -57,9 +58,14 @@ func main() {
 		log.Println("Initial setup (roles & super admin) synchronized")
 	}
 
-	// Purge sample/mock data (tasks, invoices, cashflow, audit logs) while preserving login accounts & roles
-	if err := repo.CleanSampleData(); err != nil {
-		log.Printf("Warning during sample data cleanup: %v", err)
+	// Purge sample/mock data ONLY if explicitly requested via environment variable RUN_SAMPLE_CLEANUP=true
+	// By default, this is disabled so existing operational data is never deleted when deploying.
+	if os.Getenv("RUN_SAMPLE_CLEANUP") == "true" {
+		if err := repo.CleanSampleData(); err != nil {
+			log.Printf("Warning during sample data cleanup: %v", err)
+		} else {
+			log.Println("[CLEANUP] Sample data cleanup executed as requested by RUN_SAMPLE_CLEANUP=true")
+		}
 	}
 
 	// Initialize Service Layer & Handlers
