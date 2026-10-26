@@ -39,6 +39,7 @@ type Service interface {
 	GetTasks(userID uint, month, year int, taskType, status string, page, limit int) (map[string]interface{}, error)
 	GetTaskByID(userID, taskID uint) (*domain.Task, error)
 	CreateTask(userID uint, req dto.TaskCreateRequest) (*domain.Task, error)
+	UpdateTask(userID, taskID uint, req dto.TaskCreateRequest) (*domain.Task, error)
 	UpdateTaskStatus(userID, taskID uint, status string) (*domain.Task, error)
 	ToggleChecklistItem(userID, taskID, itemID uint) (*domain.ChecklistItem, error)
 	MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmationRequest) error
@@ -139,6 +140,18 @@ func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 		roleName = r.Name
 	}
 
+	npwp := user.NPWP
+	noKtp := user.NoKTP
+	company := user.Company
+	phone := user.Phone
+	companyAddress := user.CompanyAddress
+	bankName := user.BankName
+	bankAccountNumber := user.BankAccountNumber
+	bankAccountHolder := user.BankAccountHolder
+	logoURL := user.LogoURL
+	signatureURL := user.SignatureURL
+	taxRate := user.TaxRate
+
 	var tenantResp *dto.TenantResponse
 	tenantName := ""
 	tenantSlug := ""
@@ -147,6 +160,33 @@ func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 		if err == nil && tenant != nil {
 			tenantName = tenant.Name
 			tenantSlug = tenant.Slug
+			if npwp == "" {
+				npwp = tenant.NPWP
+			}
+			if noKtp == "" {
+				noKtp = tenant.NoKTP
+			}
+			if company == "" {
+				company = tenant.Name
+			}
+			if phone == "" {
+				phone = tenant.Phone
+			}
+			if companyAddress == "" {
+				companyAddress = tenant.CompanyAddress
+			}
+			if bankName == "" {
+				bankName = tenant.BankName
+			}
+			if bankAccountNumber == "" {
+				bankAccountNumber = tenant.BankAccountNumber
+			}
+			if bankAccountHolder == "" {
+				bankAccountHolder = tenant.BankAccountHolder
+			}
+			if logoURL == "" {
+				logoURL = tenant.LogoURL
+			}
 			userCount, taskCount, _ := s.repo.GetTenantStats(tenant.ID)
 			tenantResp = &dto.TenantResponse{
 				ID:                tenant.ID,
@@ -172,21 +212,31 @@ func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 	}
 
 	return dto.UserDetailResponse{
-		ID:           user.ID,
-		Email:        user.Email,
-		Name:         user.Name,
-		AvatarURL:    user.AvatarURL,
-		Role:         user.Role,
-		RoleName:     roleName,
-		AllowedMenus: menuList,
-		OwnerID:      user.OwnerID,
-		TenantID:     user.TenantID,
-		TenantSlug:   tenantSlug,
-		TenantName:   tenantName,
-		IsOwner:      user.IsOwner,
-		NoKTP:        user.NoKTP,
-		Tenant:       tenantResp,
-		CreatedAt:    user.CreatedAt.Format("2006-01-02 15:04"),
+		ID:                user.ID,
+		Email:             user.Email,
+		Name:              user.Name,
+		Company:           company,
+		Phone:             phone,
+		CompanyAddress:    companyAddress,
+		NPWP:              npwp,
+		NoKTP:             noKtp,
+		TaxRate:           &taxRate,
+		LogoURL:           logoURL,
+		SignatureURL:      signatureURL,
+		BankName:          bankName,
+		BankAccountNumber: bankAccountNumber,
+		BankAccountHolder: bankAccountHolder,
+		AvatarURL:         user.AvatarURL,
+		Role:              user.Role,
+		RoleName:          roleName,
+		AllowedMenus:      menuList,
+		OwnerID:           user.OwnerID,
+		TenantID:          user.TenantID,
+		TenantSlug:        tenantSlug,
+		TenantName:        tenantName,
+		IsOwner:           user.IsOwner,
+		Tenant:            tenantResp,
+		CreatedAt:         user.CreatedAt.Format("2006-01-02 15:04"),
 	}
 }
 
@@ -398,7 +448,7 @@ func (s *serviceImpl) CreateTenant(req dto.CreateTenantRequest) (*dto.TenantResp
 	}
 
 	taxRate := req.TaxRate
-	if taxRate <= 0 {
+	if taxRate < 0 {
 		taxRate = 11.0
 	}
 
@@ -642,6 +692,59 @@ func (s *serviceImpl) CreateTask(userID uint, req dto.TaskCreateRequest) (*domai
 		return nil, err
 	}
 
+	// Auto-generate pending invoice for Endorse if requested (default true - Poin 7 Revisi)
+	if req.Type == "endorse" && (req.AutoInvoice == nil || *req.AutoInvoice) {
+		year := time.Now().Year()
+		seq, seqErr := s.repo.NextInvoiceSequence(s.repo.DB(), tenantID, year, "ENDORSE")
+		if seqErr == nil {
+			invNumber := fmt.Sprintf("INV/ENDORSE/%d/%03d", year, seq)
+
+			userSetting, _ := s.repo.GetUserByID(userID)
+			taxRate := float64(0)
+			if userSetting != nil {
+				taxRate = userSetting.TaxRate
+			}
+			if tenant, tErr := s.repo.GetTenantByID(tenantID); tErr == nil && tenant != nil {
+				taxRate = tenant.TaxRate
+			}
+
+			subtotal := task.FeeOrValue
+			taxAmount := (subtotal * int64(taxRate*100)) / 10000
+			grandTotal := subtotal + taxAmount
+			includeTax := taxRate > 0
+
+			itemDesc := task.Title
+			if strings.TrimSpace(task.Deliverable) != "" {
+				itemDesc = fmt.Sprintf("%s (%s)", task.Title, strings.TrimSpace(task.Deliverable))
+			}
+
+			invoice := &domain.Invoice{
+				TenantID:      tenantID,
+				UserID:        userID,
+				RelatedTaskID: &task.ID,
+				InvoiceNumber: invNumber,
+				ClientName:    task.Brand,
+				ClientPhone:   task.PicPhone,
+				IssueDate:     time.Now(),
+				DueDate:       task.DueDate,
+				IncludeTax:    includeTax,
+				TaxRate:       taxRate,
+				Subtotal:      subtotal,
+				TaxAmount:     taxAmount,
+				GrandTotal:    grandTotal,
+				Status:        "unpaid",
+				Items: []domain.InvoiceItem{
+					{Description: itemDesc, Quantity: 1, UnitPrice: subtotal, Total: subtotal},
+				},
+			}
+
+			if invErr := s.repo.CreateInvoice(invoice); invErr == nil {
+				task.RelatedInvoiceID = &invoice.ID
+				_ = s.repo.UpdateTask(task)
+			}
+		}
+	}
+
 	// Audit Log
 	user, _ := s.repo.GetUserByID(userID)
 	actor := "Creator"
@@ -656,6 +759,94 @@ func (s *serviceImpl) CreateTask(userID uint, req dto.TaskCreateRequest) (*domai
 		Action:    "CREATE_TASK",
 		Title:     fmt.Sprintf("Membuat Tugas Baru: %s", task.Title),
 		Detail:    fmt.Sprintf("Tipe: %s, Brand: %s, Nilai: Rp %d", task.Type, task.Brand, task.FeeOrValue),
+		CreatedAt: time.Now(),
+	})
+
+	return task, nil
+}
+
+func (s *serviceImpl) UpdateTask(userID, taskID uint, req dto.TaskCreateRequest) (*domain.Task, error) {
+	tenantID := s.getTenantID(userID)
+	task, err := s.repo.GetTaskByID(tenantID, taskID)
+	if err != nil {
+		return nil, errors.New("tugas tidak ditemukan")
+	}
+
+	// Ref SRS: BR-22, FR-TGS-12: Tugas hanya bisa diedit selama belum posting / belum paid
+	if task.Status == "paid" || task.Status == "posting" {
+		statusLabel := "lunas"
+		if task.Status == "posting" {
+			statusLabel = "posting"
+		}
+		return nil, fmt.Errorf("tugas sudah %s dan terkunci dari pengeditan (BR-22)", statusLabel)
+	}
+
+	dueDate, err := time.Parse("2006-01-02", req.DueDate)
+	if err != nil {
+		dueDate = task.DueDate
+	}
+
+	task.Title = req.Title
+	task.Brand = req.Brand
+	task.FeeOrValue = req.FeeOrValue
+	task.DueDate = dueDate
+	task.Deliverable = req.Deliverable
+	task.Brief = req.Brief
+	task.Platform = req.Platform
+	task.ShipmentNumber = req.ShipmentNumber
+	task.PicName = req.PicName
+	task.PicPhone = req.PicPhone
+	if req.Priority != "" {
+		task.Priority = req.Priority
+	}
+
+	if err := s.repo.UpdateTask(task); err != nil {
+		return nil, err
+	}
+
+	// If there is an unpaid related invoice, synchronize client name, item description, unit price, subtotal, grand total (BR-06)
+	if task.RelatedInvoiceID != nil {
+		inv, invErr := s.repo.GetInvoiceByID(tenantID, *task.RelatedInvoiceID)
+		if invErr == nil && inv != nil && inv.Status == "unpaid" {
+			itemDesc := task.Title
+			if strings.TrimSpace(task.Deliverable) != "" {
+				itemDesc = fmt.Sprintf("%s (%s)", task.Title, strings.TrimSpace(task.Deliverable))
+			}
+			inv.ClientName = task.Brand
+			inv.ClientPhone = task.PicPhone
+			inv.DueDate = task.DueDate
+			inv.Subtotal = task.FeeOrValue
+			if inv.IncludeTax {
+				inv.TaxAmount = int64(math.Round(float64(inv.Subtotal) * (inv.TaxRate / 100.0)))
+			} else {
+				inv.TaxAmount = 0
+			}
+			inv.GrandTotal = inv.Subtotal + inv.TaxAmount
+
+			// Update line items
+			s.repo.DB().Model(&domain.InvoiceItem{}).Where("invoice_id = ?", inv.ID).Updates(map[string]interface{}{
+				"description": itemDesc,
+				"unit_price":  task.FeeOrValue,
+				"total":       task.FeeOrValue,
+			})
+			_ = s.repo.UpdateInvoice(inv)
+		}
+	}
+
+	// Audit Log
+	user, _ := s.repo.GetUserByID(userID)
+	actor := "Creator"
+	if user != nil {
+		actor = user.Name
+	}
+	_ = s.repo.CreateAuditLog(&domain.AuditLog{
+		TenantID:  tenantID,
+		UserID:    userID,
+		Actor:     actor,
+		Module:    "Tugas",
+		Action:    "UPDATE_TASK",
+		Title:     fmt.Sprintf("Memperbarui Tugas: %s", task.Title),
+		Detail:    fmt.Sprintf("Brand: %s, Fee: Rp %d, Deliverable: %s", task.Brand, task.FeeOrValue, task.Deliverable),
 		CreatedAt: time.Now(),
 	})
 
@@ -729,6 +920,13 @@ func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmat
 			if err := tx.Where("id = ? AND tenant_id = ?", *task.RelatedInvoiceID, tenantID).First(&invoice).Error; err != nil {
 				return err
 			}
+			if req.TaxRate != nil && *req.TaxRate >= 0 && *req.TaxRate <= 100 {
+				taxRate := *req.TaxRate
+				invoice.TaxRate = taxRate
+				invoice.IncludeTax = taxRate > 0
+				invoice.TaxAmount = (invoice.Subtotal * int64(taxRate*100)) / 10000
+				invoice.GrandTotal = invoice.Subtotal + invoice.TaxAmount
+			}
 		} else {
 			// Generate invoice number
 			year := time.Now().Year()
@@ -739,9 +937,22 @@ func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmat
 			invNumber := fmt.Sprintf("INV/ENDORSE/%d/%03d", year, seq)
 
 			taxRate := userSetting.TaxRate
+			if tenant, tErr := s.repo.GetTenantByID(tenantID); tErr == nil && tenant != nil {
+				taxRate = tenant.TaxRate
+			}
+			if req.TaxRate != nil && *req.TaxRate >= 0 && *req.TaxRate <= 100 {
+				taxRate = *req.TaxRate
+			}
+
 			subtotal := task.FeeOrValue
 			taxAmount := (subtotal * int64(taxRate*100)) / 10000
 			grandTotal := subtotal + taxAmount
+			includeTax := taxRate > 0
+
+			itemDesc := task.Title
+			if strings.TrimSpace(task.Deliverable) != "" {
+				itemDesc = fmt.Sprintf("%s (%s)", task.Title, strings.TrimSpace(task.Deliverable))
+			}
 
 			invoice = domain.Invoice{
 				TenantID:      tenantID,
@@ -751,14 +962,14 @@ func (s *serviceImpl) MarkTaskPaid(userID, taskID uint, req dto.PaymentConfirmat
 				ClientName:    task.Brand,
 				IssueDate:     time.Now(),
 				DueDate:       task.DueDate,
-				IncludeTax:    true,
+				IncludeTax:    includeTax,
 				TaxRate:       taxRate,
 				Subtotal:      subtotal,
 				TaxAmount:     taxAmount,
 				GrandTotal:    grandTotal,
 				Status:        "unpaid",
 				Items: []domain.InvoiceItem{
-					{Description: task.Title, Quantity: 1, UnitPrice: subtotal, Total: subtotal},
+					{Description: itemDesc, Quantity: 1, UnitPrice: subtotal, Total: subtotal},
 				},
 			}
 			if err := tx.Create(&invoice).Error; err != nil {
@@ -932,7 +1143,11 @@ func (s *serviceImpl) CreateInvoice(userID uint, req dto.InvoiceCreateRequest) (
 		})
 	}
 
+	tenantID := s.getTenantID(userID)
 	taxRate := userSetting.TaxRate
+	if tenant, tErr := s.repo.GetTenantByID(tenantID); tErr == nil && tenant != nil {
+		taxRate = tenant.TaxRate
+	}
 	var taxAmount int64
 	if req.IncludeTax {
 		taxAmount = (subtotal * int64(taxRate*100)) / 10000
@@ -941,7 +1156,6 @@ func (s *serviceImpl) CreateInvoice(userID uint, req dto.InvoiceCreateRequest) (
 	}
 	grandTotal := subtotal + taxAmount
 
-	tenantID := s.getTenantID(userID)
 	year := time.Now().Year()
 	seq, err := s.repo.NextInvoiceSequence(s.repo.DB(), tenantID, year, "ENDORSE")
 	if err != nil {
@@ -1003,6 +1217,9 @@ func (s *serviceImpl) ToggleInvoiceTax(userID, invoiceID uint) (*domain.Invoice,
 	inv.IncludeTax = !inv.IncludeTax
 	if inv.IncludeTax {
 		inv.TaxRate = userSetting.TaxRate
+		if tenant, tErr := s.repo.GetTenantByID(tenantID); tErr == nil && tenant != nil {
+			inv.TaxRate = tenant.TaxRate
+		}
 		inv.TaxAmount = (inv.Subtotal * int64(inv.TaxRate*100)) / 10000
 	} else {
 		inv.TaxRate = 0
@@ -1201,9 +1418,6 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 	if page <= 0 {
 		page = 1
 	}
-	if limit <= 0 {
-		limit = 4 // BR-01
-	}
 	tenantID := s.getTenantID(userID)
 
 	monthNames := []string{
@@ -1319,23 +1533,68 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 	}
 
 	totalItems := int64(len(rows))
-	totalPages := int(math.Ceil(float64(totalItems) / float64(limit)))
-	if totalPages == 0 {
+	var pagedRows []ReportRow
+	var totalPages int
+
+	if limit == 0 {
+		// Return all rows without pagination limit for PDF export and printing (BR-01, FR-LAP-07)
+		pagedRows = rows
 		totalPages = 1
+		limit = len(rows)
+		if limit == 0 {
+			limit = 1
+		}
+	} else {
+		if limit < 0 {
+			limit = 4 // BR-01
+		}
+		totalPages = int(math.Ceil(float64(totalItems) / float64(limit)))
+		if totalPages == 0 {
+			totalPages = 1
+		}
+
+		start := (page - 1) * limit
+		end := start + limit
+		if start > len(rows) {
+			start = len(rows)
+		}
+		if end > len(rows) {
+			end = len(rows)
+		}
+		pagedRows = make([]ReportRow, 0)
+		if start < len(rows) {
+			pagedRows = rows[start:end]
+		}
 	}
 
-	start := (page - 1) * limit
-	end := start + limit
-	if start > len(rows) {
-		start = len(rows)
+	// Fetch expenses for operational & production breakdown (BR-23, FR-LAP-11)
+	var expenseEntities []domain.Transaction
+	eq := s.repo.DB().Where("tenant_id = ? AND type = ?", tenantID, "expense")
+	if year > 0 && month > 0 {
+		startDate := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+		endDate := startDate.AddDate(0, 1, 0)
+		eq = eq.Where("date >= ? AND date < ?", startDate, endDate)
+	} else if year > 0 {
+		startDate := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)
+		endDate := startDate.AddDate(1, 0, 0)
+		eq = eq.Where("date >= ? AND date < ?", startDate, endDate)
 	}
-	if end > len(rows) {
-		end = len(rows)
+	eq.Order("date asc, id asc").Find(&expenseEntities)
+
+	var totalExpense int64
+	expenseRows := make([]dto.ReportExpenseItem, 0)
+	for eIdx, ex := range expenseEntities {
+		totalExpense += ex.Amount
+		expenseRows = append(expenseRows, dto.ReportExpenseItem{
+			Index:       eIdx + 1,
+			ID:          ex.ID,
+			Description: ex.Description,
+			Category:    ex.Category,
+			Amount:      ex.Amount,
+			Date:        ex.Date.Format("2006-01-02"),
+		})
 	}
-	pagedRows := make([]ReportRow, 0)
-	if start < len(rows) {
-		pagedRows = rows[start:end]
-	}
+	netIncome := totalPaid - totalExpense
 
 	return &dto.ReportResponse{
 		PeriodLabel:     periodLabel,
@@ -1345,6 +1604,9 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 		TotalPaid:       totalPaid,
 		TotalUnpaid:     totalUnpaid,
 		BarterValuation: barterValuation,
+		TotalExpense:    totalExpense,
+		NetIncome:       netIncome,
+		Expenses:        expenseRows,
 		Projects:        pagedRows,
 		Pagination: dto.PageMeta{
 			CurrentPage: page,
@@ -1357,7 +1619,34 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 
 // Settings
 func (s *serviceImpl) GetSettings(userID uint) (*domain.User, error) {
-	return s.repo.GetUserByID(userID)
+	user, err := s.repo.GetUserByID(userID)
+	if err != nil {
+		return nil, err
+	}
+	if user.TenantID > 0 {
+		tenant, tErr := s.repo.GetTenantByID(user.TenantID)
+		if tErr == nil && tenant != nil {
+			if user.LogoURL == "" && tenant.LogoURL != "" {
+				user.LogoURL = tenant.LogoURL
+			}
+			if user.Company == "" && tenant.Name != "" {
+				user.Company = tenant.Name
+			}
+			if user.CompanyAddress == "" && tenant.CompanyAddress != "" {
+				user.CompanyAddress = tenant.CompanyAddress
+			}
+			if user.Phone == "" && tenant.Phone != "" {
+				user.Phone = tenant.Phone
+			}
+			if user.NPWP == "" && tenant.NPWP != "" {
+				user.NPWP = tenant.NPWP
+			}
+			if user.NoKTP == "" && tenant.NoKTP != "" {
+				user.NoKTP = tenant.NoKTP
+			}
+		}
+	}
+	return user, nil
 }
 
 func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest) (*domain.User, error) {
@@ -1405,9 +1694,9 @@ func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest)
 	}
 
 	tenantID := s.getTenantID(userID)
-	// Also sync tenant company/tax info if this user is the owner
-	if user.IsOwner && user.TenantID > 0 {
-		tenant, tErr := s.repo.GetTenantByID(user.TenantID)
+	// Also sync tenant company/tax info
+	if tenantID > 0 {
+		tenant, tErr := s.repo.GetTenantByID(tenantID)
 		if tErr == nil && tenant != nil {
 			if req.Company != "" {
 				tenant.Name = req.Company
@@ -1425,6 +1714,9 @@ func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest)
 			if req.TaxRate >= 0 && req.TaxRate <= 100 {
 				tenant.TaxRate = req.TaxRate
 			}
+			if req.LogoURL != "" {
+				tenant.LogoURL = req.LogoURL
+			}
 			if req.BankName != "" {
 				tenant.BankName = req.BankName
 			}
@@ -1435,6 +1727,17 @@ func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest)
 				tenant.BankAccountHolder = req.BankAccountHolder
 			}
 			_ = s.repo.UpdateTenant(tenant)
+
+			// Propagate studio settings (tax rate, logo, company) to all users under this tenant
+			if req.TaxRate >= 0 && req.TaxRate <= 100 {
+				_ = s.repo.DB().Model(&domain.User{}).Where("tenant_id = ?", tenantID).Update("tax_rate", req.TaxRate)
+			}
+			if req.LogoURL != "" {
+				_ = s.repo.DB().Model(&domain.User{}).Where("tenant_id = ?", tenantID).Update("logo_url", req.LogoURL)
+			}
+			if req.Company != "" {
+				_ = s.repo.DB().Model(&domain.User{}).Where("tenant_id = ?", tenantID).Update("company", req.Company)
+			}
 		}
 	}
 

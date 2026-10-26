@@ -80,6 +80,7 @@ type TaskCreateRequest struct {
 	Status         string   `json:"status"`   // initial status
 	Brief          string   `json:"brief"`
 	Checklist      []string `json:"checklist"`
+	AutoInvoice    *bool    `json:"auto_invoice"`
 }
 
 type TaskStatusUpdateRequest struct {
@@ -87,8 +88,9 @@ type TaskStatusUpdateRequest struct {
 }
 
 type PaymentConfirmationRequest struct {
-	PaymentProofURL  string `json:"payment_proof_url"`
-	PaymentProofName string `json:"payment_proof_name"`
+	PaymentProofURL  string   `json:"payment_proof_url"`
+	PaymentProofName string   `json:"payment_proof_name"`
+	TaxRate          *float64 `json:"tax_rate"`
 }
 
 // Invoice DTOs
@@ -161,21 +163,31 @@ type UserUpdateRequest struct {
 }
 
 type UserDetailResponse struct {
-	ID           uint        `json:"id"`
-	TenantID     uint        `json:"tenant_id"`
-	TenantSlug   string      `json:"tenant_slug"`
-	TenantName   string      `json:"tenant_name"`
-	IsOwner      bool        `json:"is_owner"`
-	NoKTP        string      `json:"no_ktp,omitempty"`
-	Email        string      `json:"email"`
-	Name         string      `json:"name"`
-	AvatarURL    string      `json:"avatar_url"`
-	Role         string      `json:"role"`
-	RoleName     string      `json:"role_name"`
-	AllowedMenus []string    `json:"allowed_menus"`
-	OwnerID      *uint       `json:"owner_id"`
-	Tenant       interface{} `json:"tenant,omitempty"`
-	CreatedAt    string      `json:"created_at"`
+	ID                uint        `json:"id"`
+	TenantID          uint        `json:"tenant_id"`
+	TenantSlug        string      `json:"tenant_slug"`
+	TenantName        string      `json:"tenant_name"`
+	IsOwner           bool        `json:"is_owner"`
+	NPWP              string      `json:"npwp,omitempty"`
+	NoKTP             string      `json:"no_ktp,omitempty"`
+	Email             string      `json:"email"`
+	Name              string      `json:"name"`
+	Company           string      `json:"company,omitempty"`
+	Phone             string      `json:"phone,omitempty"`
+	CompanyAddress    string      `json:"company_address,omitempty"`
+	TaxRate           *float64    `json:"tax_rate,omitempty"`
+	LogoURL           string      `json:"logo_url,omitempty"`
+	SignatureURL      string      `json:"signature_url,omitempty"`
+	BankName          string      `json:"bank_name,omitempty"`
+	BankAccountNumber string      `json:"bank_account_number,omitempty"`
+	BankAccountHolder string      `json:"bank_account_holder,omitempty"`
+	AvatarURL         string      `json:"avatar_url"`
+	Role              string      `json:"role"`
+	RoleName          string      `json:"role_name"`
+	AllowedMenus      []string    `json:"allowed_menus"`
+	OwnerID           *uint       `json:"owner_id"`
+	Tenant            interface{} `json:"tenant,omitempty"`
+	CreatedAt         string      `json:"created_at"`
 }
 
 type RoleRequest struct {
@@ -212,17 +224,29 @@ type CashflowSum struct {
 	NetCashflow  int64 `json:"net_cashflow"`
 }
 
+type ReportExpenseItem struct {
+	Index       int    `json:"index"`
+	ID          uint   `json:"id"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	Amount      int64  `json:"amount"`
+	Date        string `json:"date"`
+}
+
 // Reports DTO
 type ReportResponse struct {
-	PeriodLabel     string      `json:"period_label"`
-	FilterType      string      `json:"filter_type"`
-	TotalProjects   int         `json:"total_projects"`
-	TotalFeeRevenue int64       `json:"total_fee_revenue"`
-	TotalPaid       int64       `json:"total_paid"`
-	TotalUnpaid     int64       `json:"total_unpaid"`
-	BarterValuation int64       `json:"barter_valuation"`
-	Projects        interface{} `json:"projects"`
-	Pagination      PageMeta    `json:"pagination"`
+	PeriodLabel     string              `json:"period_label"`
+	FilterType      string              `json:"filter_type"`
+	TotalProjects   int                 `json:"total_projects"`
+	TotalFeeRevenue int64               `json:"total_fee_revenue"`
+	TotalPaid       int64               `json:"total_paid"`
+	TotalUnpaid     int64               `json:"total_unpaid"`
+	BarterValuation int64               `json:"barter_valuation"`
+	TotalExpense    int64               `json:"total_expense"`
+	NetIncome       int64               `json:"net_income"`
+	Expenses        []ReportExpenseItem `json:"expenses"`
+	Projects        interface{}         `json:"projects"`
+	Pagination      PageMeta            `json:"pagination"`
 }
 
 type PageMeta struct {

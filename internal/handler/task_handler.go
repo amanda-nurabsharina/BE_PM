@@ -66,6 +66,26 @@ func (h *TaskHandler) CreateTask(c *fiber.Ctx) error {
 	return response.Success(c, fiber.StatusCreated, "Tugas berhasil dibuat", task)
 }
 
+func (h *TaskHandler) UpdateTask(c *fiber.Ctx) error {
+	user := middleware.GetAuthUser(c)
+	taskID, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "ID tugas tidak valid", nil)
+	}
+
+	var req dto.TaskCreateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid request payload", err.Error())
+	}
+
+	task, err := h.svc.UpdateTask(user.UserID, uint(taskID), req)
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, err.Error(), nil)
+	}
+
+	return response.Success(c, fiber.StatusOK, "Rincian tugas berhasil diperbarui", task)
+}
+
 func (h *TaskHandler) UpdateTaskStatus(c *fiber.Ctx) error {
 	user := middleware.GetAuthUser(c)
 	taskID, err := strconv.ParseUint(c.Params("id"), 10, 64)

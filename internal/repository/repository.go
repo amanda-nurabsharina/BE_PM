@@ -140,6 +140,26 @@ func (r *gormRepository) AutoMigrateMultiTenant() error {
 	r.db.Exec("UPDATE transactions SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
 	r.db.Exec("UPDATE audit_logs SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
 	r.db.Exec("UPDATE sequence_counters SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0")
+	r.db.Exec("UPDATE invoices SET tax_rate = 0, include_tax = false WHERE tax_amount = 0")
+
+	// 2.1 Update invoice item description to include task deliverable (BR-06)
+	r.db.Exec(`
+		UPDATE invoice_items 
+		SET description = (
+			SELECT tasks.title || ' (' || tasks.deliverable || ')' 
+			FROM invoices 
+			JOIN tasks ON invoices.related_task_id = tasks.id 
+			WHERE invoices.id = invoice_items.invoice_id
+		)
+		WHERE invoice_id IN (
+			SELECT invoices.id 
+			FROM invoices 
+			JOIN tasks ON invoices.related_task_id = tasks.id 
+			WHERE tasks.deliverable IS NOT NULL 
+			  AND tasks.deliverable != '' 
+			  AND invoice_items.description = tasks.title
+		)
+	`)
 
 	// 3. Mark the primary creator user as tenant owner
 	r.db.Model(&domain.User{}).Where("email = ? OR (tenant_id = 1 AND owner_id IS NULL)", "reza@studio.id").

@@ -127,6 +127,7 @@ func main() {
 	creator.Get("/tasks", taskHandler.GetTasks)
 	creator.Post("/tasks", taskHandler.CreateTask)
 	creator.Get("/tasks/:id", taskHandler.GetTaskByID)
+	creator.Put("/tasks/:id", taskHandler.UpdateTask)
 	creator.Put("/tasks/:id/status", taskHandler.UpdateTaskStatus)
 	creator.Post("/tasks/:id/checklist/:itemId/toggle", taskHandler.ToggleChecklistItem)
 	creator.Post("/tasks/:id/pay", taskHandler.MarkTaskPaid)
