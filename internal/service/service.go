@@ -156,6 +156,7 @@ func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 				CompanyAddress:    tenant.CompanyAddress,
 				Phone:             tenant.Phone,
 				NPWP:              tenant.NPWP,
+				NoKTP:             tenant.NoKTP,
 				TaxRate:           tenant.TaxRate,
 				BankName:          tenant.BankName,
 				BankAccountNumber: tenant.BankAccountNumber,
@@ -183,6 +184,7 @@ func (s *serviceImpl) toUserDetail(user *domain.User) dto.UserDetailResponse {
 		TenantSlug:   tenantSlug,
 		TenantName:   tenantName,
 		IsOwner:      user.IsOwner,
+		NoKTP:        user.NoKTP,
 		Tenant:       tenantResp,
 		CreatedAt:    user.CreatedAt.Format("2006-01-02 15:04"),
 	}
@@ -320,6 +322,7 @@ func (s *serviceImpl) GetTenants() ([]dto.TenantResponse, error) {
 			CompanyAddress:    t.CompanyAddress,
 			Phone:             t.Phone,
 			NPWP:              t.NPWP,
+			NoKTP:             t.NoKTP,
 			TaxRate:           t.TaxRate,
 			BankName:          t.BankName,
 			BankAccountNumber: t.BankAccountNumber,
@@ -353,6 +356,7 @@ func (s *serviceImpl) GetTenantByID(id uint) (*dto.TenantResponse, error) {
 		CompanyAddress:    t.CompanyAddress,
 		Phone:             t.Phone,
 		NPWP:              t.NPWP,
+		NoKTP:             t.NoKTP,
 		TaxRate:           t.TaxRate,
 		BankName:          t.BankName,
 		BankAccountNumber: t.BankAccountNumber,
@@ -405,6 +409,7 @@ func (s *serviceImpl) CreateTenant(req dto.CreateTenantRequest) (*dto.TenantResp
 		CompanyAddress:    req.CompanyAddress,
 		Phone:             req.Phone,
 		NPWP:              req.NPWP,
+		NoKTP:             req.NoKTP,
 		TaxRate:           taxRate,
 		BankName:          req.BankName,
 		BankAccountNumber: req.BankAccountNumber,
@@ -428,6 +433,7 @@ func (s *serviceImpl) CreateTenant(req dto.CreateTenantRequest) (*dto.TenantResp
 			CompanyAddress:    req.CompanyAddress,
 			Phone:             req.Phone,
 			NPWP:              req.NPWP,
+			NoKTP:             req.NoKTP,
 			TaxRate:           taxRate,
 			BankName:          req.BankName,
 			BankAccountNumber: req.BankAccountNumber,
@@ -1375,6 +1381,7 @@ func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest)
 	if req.NPWP != "" {
 		user.NPWP = req.NPWP
 	}
+	user.NoKTP = req.NoKTP
 	if req.TaxRate >= 0 && req.TaxRate <= 100 {
 		user.TaxRate = req.TaxRate
 	}
@@ -1414,6 +1421,7 @@ func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest)
 			if req.NPWP != "" {
 				tenant.NPWP = req.NPWP
 			}
+			tenant.NoKTP = req.NoKTP
 			if req.TaxRate >= 0 && req.TaxRate <= 100 {
 				tenant.TaxRate = req.TaxRate
 			}

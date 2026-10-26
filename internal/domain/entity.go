@@ -16,6 +16,7 @@ type Tenant struct {
 	Phone             string         `gorm:"size:50" json:"phone"`
 	CompanyAddress    string         `gorm:"type:text" json:"company_address"`
 	NPWP              string         `gorm:"size:50" json:"npwp"`
+	NoKTP             string         `gorm:"size:50" json:"no_ktp"`
 	TaxRate           float64        `gorm:"default:11.0" json:"tax_rate"`
 	BankName          string         `gorm:"size:100" json:"bank_name"`
 	BankAccountNumber string         `gorm:"size:100" json:"bank_account_number"`
@@ -37,6 +38,7 @@ type User struct {
 	Phone             string         `gorm:"size:50" json:"phone"`
 	CompanyAddress    string         `gorm:"type:text" json:"company_address"`
 	NPWP              string         `gorm:"size:50" json:"npwp"`
+	NoKTP             string         `gorm:"size:50" json:"no_ktp"`
 	TaxRate           float64        `gorm:"default:11.0" json:"tax_rate"` // Default PPN % (0 - 100)
 	LogoURL           string         `gorm:"type:text" json:"logo_url"`
 	SignatureURL      string         `gorm:"type:text" json:"signature_url"`

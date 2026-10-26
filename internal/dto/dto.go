@@ -27,6 +27,7 @@ type CreateTenantRequest struct {
 	Phone             string  `json:"phone"`
 	CompanyAddress    string  `json:"company_address"`
 	NPWP              string  `json:"npwp"`
+	NoKTP             string  `json:"no_ktp"`
 	TaxRate           float64 `json:"tax_rate"`
 	BankName          string  `json:"bank_name"`
 	BankAccountNumber string  `json:"bank_account_number"`
@@ -42,6 +43,7 @@ type TenantResponse struct {
 	Phone             string  `json:"phone"`
 	CompanyAddress    string  `json:"company_address"`
 	NPWP              string  `json:"npwp"`
+	NoKTP             string  `json:"no_ktp"`
 	TaxRate           float64 `json:"tax_rate"`
 	BankName          string  `json:"bank_name"`
 	BankAccountNumber string  `json:"bank_account_number"`
@@ -125,6 +127,7 @@ type SettingsUpdateRequest struct {
 	Phone             string  `json:"phone"`
 	CompanyAddress    string  `json:"company_address"`
 	NPWP              string  `json:"npwp"`
+	NoKTP             string  `json:"no_ktp"`
 	TaxRate           float64 `json:"tax_rate"`
 	LogoURL           string  `json:"logo_url"`
 	SignatureURL      string  `json:"signature_url"`
@@ -163,6 +166,7 @@ type UserDetailResponse struct {
 	TenantSlug   string      `json:"tenant_slug"`
 	TenantName   string      `json:"tenant_name"`
 	IsOwner      bool        `json:"is_owner"`
+	NoKTP        string      `json:"no_ktp,omitempty"`
 	Email        string      `json:"email"`
 	Name         string      `json:"name"`
 	AvatarURL    string      `json:"avatar_url"`
