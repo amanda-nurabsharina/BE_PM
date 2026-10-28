@@ -25,7 +25,7 @@ func (h *ReportHandler) GetReports(c *fiber.Ctx) error {
 	coopType := c.Query("type", "all")
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	limit, _ := strconv.Atoi(c.Query("limit", "4"))
-	if c.Query("all") == "true" || c.Query("limit") == "0" {
+	if c.Query("all") == "true" || c.Query("all") == "1" || c.Query("limit") == "0" || c.Query("limit") == "all" || limit == 0 {
 		limit = 0
 	}
 
