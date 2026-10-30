@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"be-pm/config"
@@ -82,8 +83,9 @@ type Service interface {
 }
 
 type serviceImpl struct {
-	repo repository.Repository
-	cfg  *config.Config
+	repo      repository.Repository
+	cfg       *config.Config
+	syncMutex sync.Mutex
 }
 
 func NewService(repo repository.Repository, cfg *config.Config) Service {
@@ -1049,18 +1051,140 @@ func (s *serviceImpl) DeleteTask(userID, taskID uint) error {
 	return nil
 }
 
-// syncMissingInvoices ensures that all endorse tasks for this tenant have an associated invoice
+// cleanupDuplicateInvoices finds and removes duplicate invoices for the same task in this tenant
+func (s *serviceImpl) cleanupDuplicateInvoices(tenantID uint) {
+	if tenantID == 0 {
+		return
+	}
+
+	// 1. Group by related_task_id to remove duplicates pointing to the same task
+	type TaskDupGroup struct {
+		RelatedTaskID uint
+		Count         int
+	}
+	var taskDups []TaskDupGroup
+	s.repo.DB().Model(&domain.Invoice{}).
+		Select("related_task_id, count(*) as count").
+		Where("tenant_id = ? AND related_task_id IS NOT NULL", tenantID).
+		Group("related_task_id").
+		Having("count(*) > 1").
+		Scan(&taskDups)
+
+	for _, td := range taskDups {
+		var invs []domain.Invoice
+		s.repo.DB().Where("tenant_id = ? AND related_task_id = ?", tenantID, td.RelatedTaskID).
+			Order("id asc").
+			Find(&invs)
+
+		if len(invs) > 1 {
+			keepIdx := 0
+			for idx, inv := range invs {
+				if inv.Status == "paid" || inv.PaymentProofURL != "" {
+					keepIdx = idx
+					break
+				}
+			}
+			keepID := invs[keepIdx].ID
+
+			_ = s.repo.DB().Model(&domain.Task{}).Where("id = ?", td.RelatedTaskID).Update("related_invoice_id", keepID)
+
+			for idx, inv := range invs {
+				if idx != keepIdx {
+					s.repo.DB().Where("invoice_id = ?", inv.ID).Delete(&domain.InvoiceItem{})
+					s.repo.DB().Unscoped().Where("id = ?", inv.ID).Delete(&domain.Invoice{})
+				}
+			}
+		}
+	}
+
+	// 2. Also clean up duplicate unpaid invoices with identical client_name, subtotal, and due_date
+	type ClientDupGroup struct {
+		ClientName string
+		Subtotal   int64
+		DueDate    time.Time
+		Count      int
+	}
+	var clientDups []ClientDupGroup
+	s.repo.DB().Model(&domain.Invoice{}).
+		Select("client_name, subtotal, due_date, count(*) as count").
+		Where("tenant_id = ? AND status != ?", tenantID, "paid").
+		Group("client_name, subtotal, due_date").
+		Having("count(*) > 1").
+		Scan(&clientDups)
+
+	for _, cd := range clientDups {
+		var invs []domain.Invoice
+		s.repo.DB().Where("tenant_id = ? AND client_name = ? AND subtotal = ? AND due_date = ? AND status != ?",
+			tenantID, cd.ClientName, cd.Subtotal, cd.DueDate, "paid").
+			Order("id asc").
+			Find(&invs)
+
+		if len(invs) > 1 {
+			keepID := invs[0].ID
+			for idx := 1; idx < len(invs); idx++ {
+				inv := invs[idx]
+				s.repo.DB().Where("invoice_id = ?", inv.ID).Delete(&domain.InvoiceItem{})
+				s.repo.DB().Unscoped().Where("id = ?", inv.ID).Delete(&domain.Invoice{})
+			}
+			if invs[0].RelatedTaskID != nil {
+				_ = s.repo.DB().Model(&domain.Task{}).Where("id = ?", *invs[0].RelatedTaskID).Update("related_invoice_id", keepID)
+			}
+		}
+	}
+}
+
+// syncMissingInvoices ensures that all endorse tasks for this tenant have an associated invoice without duplicating
 func (s *serviceImpl) syncMissingInvoices(tenantID, userID uint) {
 	if tenantID == 0 {
 		return
 	}
+
+	s.syncMutex.Lock()
+	defer s.syncMutex.Unlock()
+
+	// 1. First clean up any duplicate invoices that already exist
+	s.cleanupDuplicateInvoices(tenantID)
+
+	// 2. Fetch all endorse tasks for this tenant
 	var tasks []domain.Task
-	err := s.repo.DB().Where("tenant_id = ? AND type = ? AND related_invoice_id IS NULL", tenantID, "endorse").Find(&tasks).Error
+	err := s.repo.DB().Where("tenant_id = ? AND type = ?", tenantID, "endorse").Find(&tasks).Error
 	if err != nil || len(tasks) == 0 {
 		return
 	}
 
 	for _, task := range tasks {
+		var existingInv domain.Invoice
+		found := false
+
+		// Check by related_invoice_id
+		if task.RelatedInvoiceID != nil && *task.RelatedInvoiceID > 0 {
+			if s.repo.DB().Where("id = ? AND tenant_id = ?", *task.RelatedInvoiceID, tenantID).First(&existingInv).Error == nil {
+				found = true
+			}
+		}
+
+		// Check by related_task_id
+		if !found {
+			if s.repo.DB().Where("tenant_id = ? AND related_task_id = ?", tenantID, task.ID).First(&existingInv).Error == nil {
+				found = true
+				_ = s.repo.DB().Model(&domain.Task{}).Where("id = ?", task.ID).Update("related_invoice_id", existingInv.ID)
+			}
+		}
+
+		// Check by matching brand, fee, and due date
+		if !found {
+			if s.repo.DB().Where("tenant_id = ? AND client_name = ? AND subtotal = ? AND due_date = ?",
+				tenantID, task.Brand, task.FeeOrValue, task.DueDate).First(&existingInv).Error == nil {
+				found = true
+				_ = s.repo.DB().Model(&domain.Task{}).Where("id = ?", task.ID).Update("related_invoice_id", existingInv.ID)
+				_ = s.repo.DB().Model(&domain.Invoice{}).Where("id = ?", existingInv.ID).Update("related_task_id", task.ID)
+			}
+		}
+
+		if found {
+			continue // Already has invoice, skip creation!
+		}
+
 		year := task.DueDate.Year()
 		if year < 2020 {
 			year = time.Now().Year()
