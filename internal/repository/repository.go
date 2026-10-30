@@ -10,7 +10,6 @@ import (
 	"be-pm/pkg/security"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type Repository interface {
@@ -434,21 +433,28 @@ func (r *gormRepository) GetUnpaidInvoicesCount(tenantID uint) (int64, int64, er
 }
 
 func (r *gormRepository) NextInvoiceSequence(tx *gorm.DB, tenantID uint, year int, prefix string) (int, error) {
-	var counter domain.SequenceCounter
 	if tenantID == 0 {
 		tenantID = 1
 	}
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("tenant_id = ? AND year = ? AND prefix = ?", tenantID, year, prefix).
-		FirstOrCreate(&counter, domain.SequenceCounter{TenantID: tenantID, Year: year, Prefix: prefix, LastSeq: 0}).Error
+	var counter domain.SequenceCounter
+
+	// Safely retrieve or initialize counter without locking clauses that fail outside transaction blocks
+	err := tx.Transaction(func(db *gorm.DB) error {
+		if err := db.Where("tenant_id = ? AND year = ? AND prefix = ?", tenantID, year, prefix).
+			FirstOrCreate(&counter, domain.SequenceCounter{TenantID: tenantID, Year: year, Prefix: prefix, LastSeq: 0}).Error; err != nil {
+			return err
+		}
+		counter.LastSeq++
+		return db.Model(&counter).Update("last_seq", counter.LastSeq).Error
+	})
+
 	if err != nil {
-		return 0, err
+		// Fallback: calculate sequence based on existing invoices in this year
+		var count int64
+		_ = tx.Model(&domain.Invoice{}).Where("tenant_id = ? AND issue_date >= ?", tenantID, time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)).Count(&count)
+		return int(count) + 1, nil
 	}
 
-	counter.LastSeq++
-	if err := tx.Save(&counter).Error; err != nil {
-		return 0, err
-	}
 	return counter.LastSeq, nil
 }
 

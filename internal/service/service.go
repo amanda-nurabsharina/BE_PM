@@ -521,6 +521,9 @@ func (s *serviceImpl) GetDashboard(userID uint) (*dto.DashboardResponse, error) 
 	currentYear := now.Year()
 	tenantID := s.getTenantID(userID)
 
+	// Ensure any endorse tasks have corresponding invoices synced
+	s.syncMissingInvoices(tenantID, userID)
+
 	// 1. All-time cash balance & current month cashflow
 	allIncome, _, allNet, err := s.repo.GetCashflowSummary(tenantID, 0, 0)
 	if err != nil {
@@ -840,6 +843,10 @@ func (s *serviceImpl) UpdateTaskStatus(userID, taskID uint, status string) (*dom
 		return nil, err
 	}
 
+	if task.Type == "endorse" && (status == "waiting_payment" || status == "paid") && task.RelatedInvoiceID == nil {
+		s.syncMissingInvoices(tenantID, userID)
+	}
+
 	user, _ := s.repo.GetUserByID(userID)
 	actor := "Creator"
 	if user != nil {
@@ -1042,6 +1049,80 @@ func (s *serviceImpl) DeleteTask(userID, taskID uint) error {
 	return nil
 }
 
+// syncMissingInvoices ensures that all endorse tasks for this tenant have an associated invoice
+func (s *serviceImpl) syncMissingInvoices(tenantID, userID uint) {
+	if tenantID == 0 {
+		return
+	}
+	var tasks []domain.Task
+	err := s.repo.DB().Where("tenant_id = ? AND type = ? AND related_invoice_id IS NULL", tenantID, "endorse").Find(&tasks).Error
+	if err != nil || len(tasks) == 0 {
+		return
+	}
+
+	for _, task := range tasks {
+		year := task.DueDate.Year()
+		if year < 2020 {
+			year = time.Now().Year()
+		}
+		seq, _ := s.repo.NextInvoiceSequence(s.repo.DB(), tenantID, year, "ENDORSE")
+		invNumber := fmt.Sprintf("INV/ENDORSE/%d/%03d", year, seq)
+
+		taxRate := float64(0)
+		if tenant, tErr := s.repo.GetTenantByID(tenantID); tErr == nil && tenant != nil {
+			taxRate = tenant.TaxRate
+		}
+
+		subtotal := task.FeeOrValue
+		taxAmount := (subtotal * int64(taxRate*100)) / 10000
+		grandTotal := subtotal + taxAmount
+		includeTax := taxRate > 0
+
+		itemDesc := task.Title
+		if strings.TrimSpace(task.Deliverable) != "" {
+			itemDesc = fmt.Sprintf("%s (%s)", task.Title, strings.TrimSpace(task.Deliverable))
+		}
+
+		invStatus := "unpaid"
+		if task.Status == "paid" {
+			invStatus = "paid"
+		}
+
+		issueDate := task.CreatedAt
+		if issueDate.IsZero() {
+			issueDate = time.Now()
+		}
+
+		invoice := &domain.Invoice{
+			TenantID:         tenantID,
+			UserID:           task.UserID,
+			RelatedTaskID:    &task.ID,
+			InvoiceNumber:    invNumber,
+			ClientName:       task.Brand,
+			ClientPhone:      task.PicPhone,
+			IssueDate:        issueDate,
+			DueDate:          task.DueDate,
+			IncludeTax:       includeTax,
+			TaxRate:          taxRate,
+			Subtotal:         subtotal,
+			TaxAmount:        taxAmount,
+			GrandTotal:       grandTotal,
+			Status:           invStatus,
+			PaymentProofURL:  task.PaymentProofURL,
+			PaymentProofName: task.PaymentProofName,
+			Items: []domain.InvoiceItem{
+				{Description: itemDesc, Quantity: 1, UnitPrice: subtotal, Total: subtotal},
+			},
+		}
+
+		if err := s.repo.CreateInvoice(invoice); err == nil {
+			tID := task.ID
+			invID := invoice.ID
+			_ = s.repo.DB().Model(&domain.Task{}).Where("id = ?", tID).Update("related_invoice_id", invID)
+		}
+	}
+}
+
 // Invoices
 func (s *serviceImpl) GetInvoices(userID uint, month, year int, status string, page, limit int) (map[string]interface{}, error) {
 	if page <= 0 {
@@ -1051,6 +1132,9 @@ func (s *serviceImpl) GetInvoices(userID uint, month, year int, status string, p
 		limit = 4 // BR-01
 	}
 	tenantID := s.getTenantID(userID)
+
+	// Ensure any endorse tasks (pending/waiting_payment/paid) have a linked invoice
+	s.syncMissingInvoices(tenantID, userID)
 
 	invoices, total, err := s.repo.GetInvoices(tenantID, month, year, status, page, limit)
 	if err != nil {
