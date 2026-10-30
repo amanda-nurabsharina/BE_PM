@@ -7,10 +7,6 @@ type LoginRequest struct {
 	TenantSlug string `json:"tenant_slug"`
 }
 
-type QuickLoginRequest struct {
-	Email      string `json:"email"`
-	TenantSlug string `json:"tenant_slug"`
-}
 
 type LoginResponse struct {
 	Token string      `json:"token"`

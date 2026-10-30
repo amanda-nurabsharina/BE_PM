@@ -30,23 +30,3 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 	return response.Success(c, fiber.StatusOK, "Login berhasil", res)
 }
 
-func (h *AuthHandler) QuickLogin(c *fiber.Ctx) error {
-	var req dto.QuickLoginRequest
-	_ = c.BodyParser(&req)
-
-	res, err := h.svc.QuickLogin(req.Email)
-	if err != nil {
-		return response.Error(c, fiber.StatusBadRequest, err.Error(), nil)
-	}
-
-	return response.Success(c, fiber.StatusOK, "Quick login berhasil", res)
-}
-
-func (h *AuthHandler) GetQuickUsers(c *fiber.Ctx) error {
-	users, err := h.svc.GetQuickUsers()
-	if err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, "Gagal memuat profil cepat", err.Error())
-	}
-
-	return response.Success(c, fiber.StatusOK, "Daftar profil cepat", users)
-}

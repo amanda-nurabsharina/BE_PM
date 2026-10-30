@@ -21,8 +21,6 @@ type Service interface {
 	// Auth
 	Login(req dto.LoginRequest) (*dto.LoginResponse, error)
 	AdminLogin(req dto.LoginRequest) (*dto.LoginResponse, error)
-	QuickLogin(email string) (*dto.LoginResponse, error)
-	GetQuickUsers() ([]domain.User, error)
 	ChangePassword(userID uint, req dto.ChangePasswordRequest) error
 
 	// Platform & Tenant Management
@@ -321,35 +319,6 @@ func (s *serviceImpl) AdminLogin(req dto.LoginRequest) (*dto.LoginResponse, erro
 	return &dto.LoginResponse{Token: token, User: s.toUserDetail(user)}, nil
 }
 
-func (s *serviceImpl) QuickLogin(email string) (*dto.LoginResponse, error) {
-	if email == "" {
-		email = "reza@studio.id"
-	}
-
-	user, err := s.repo.GetUserByEmail(email)
-	if err != nil {
-		return nil, errors.New("profil tidak ditemukan")
-	}
-
-	tenantSlug := ""
-	if user.TenantID > 0 {
-		tenant, tErr := s.repo.GetTenantByID(user.TenantID)
-		if tErr == nil && tenant != nil {
-			tenantSlug = tenant.Slug
-		}
-	}
-
-	token, err := security.GenerateToken(user.ID, user.TenantID, tenantSlug, user.Email, user.Name, user.Role, s.cfg.JWTSecret, 24*time.Hour)
-	if err != nil {
-		return nil, err
-	}
-
-	return &dto.LoginResponse{Token: token, User: s.toUserDetail(user)}, nil
-}
-
-func (s *serviceImpl) GetQuickUsers() ([]domain.User, error) {
-	return s.repo.GetQuickUsers()
-}
 
 // Platform Tenant Management
 func (s *serviceImpl) GetTenants() ([]dto.TenantResponse, error) {

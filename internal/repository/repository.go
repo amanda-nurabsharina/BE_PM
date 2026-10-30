@@ -37,7 +37,6 @@ type Repository interface {
 	UpdateUser(user *domain.User) error
 	DeleteUser(userID uint) error
 	GetUsers(tenantID uint) ([]domain.User, error)
-	GetQuickUsers() ([]domain.User, error)
 	UpdatePassword(userID uint, newHash string) error
 
 	// Roles
@@ -258,13 +257,6 @@ func (r *gormRepository) GetUsers(tenantID uint) ([]domain.User, error) {
 	return users, err
 }
 
-func (r *gormRepository) GetQuickUsers() ([]domain.User, error) {
-	var users []domain.User
-	err := r.db.Select("id, tenant_id, name, email, company, avatar_url, role, allowed_menus").
-		Where("email != ? AND role != ?", "superadmin@creatortask.id", "SUPER_ADMIN").
-		Order("tenant_id asc, id asc").Find(&users).Error
-	return users, err
-}
 
 func (r *gormRepository) UpdatePassword(userID uint, newHash string) error {
 	return r.db.Model(&domain.User{}).Where("id = ?", userID).Update("password_hash", newHash).Error

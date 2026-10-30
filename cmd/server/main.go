@@ -110,8 +110,6 @@ func main() {
 	// 1. AUTH ROUTES
 	authGroup := api.Group("/auth")
 	authGroup.Post("/login", middleware.SetupAuthRateLimiter(), authHandler.Login)
-	authGroup.Post("/quick-login", authHandler.QuickLogin)
-	authGroup.Get("/quick-users", authHandler.GetQuickUsers)
 
 	// 2. CREATOR MANAGEMENT ROUTES (Protected by JWT Auth)
 	creator := api.Group("/creator", middleware.RequireJWT(cfg.JWTSecret))
