@@ -77,7 +77,7 @@ func (h *InvoiceHandler) ToggleInvoiceTax(c *fiber.Ctx) error {
 		return response.Error(c, fiber.StatusBadRequest, err.Error(), nil)
 	}
 
-	return response.Success(c, fiber.StatusOK, "Status PPN invoice berhasil diubah", inv)
+	return response.Success(c, fiber.StatusOK, "Status Pajak PPh invoice berhasil diubah", inv)
 }
 
 func (h *InvoiceHandler) MarkInvoicePaid(c *fiber.Ctx) error {

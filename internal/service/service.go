@@ -1670,7 +1670,7 @@ func (s *serviceImpl) GetReports(userID uint, month, year int, coopType string, 
 				var inv domain.Invoice
 				if err := s.repo.DB().Where("id = ? AND tenant_id = ?", *t.RelatedInvoiceID, tenantID).First(&inv).Error; err == nil {
 					invNumber = inv.InvoiceNumber
-					val = inv.GrandTotal // BR-14: include PPN
+					val = inv.GrandTotal // BR-14: include PPh
 					if inv.Status == "paid" {
 						statusLabel = "LUNAS"
 					}
@@ -1925,7 +1925,7 @@ func (s *serviceImpl) UpdateSettings(userID uint, req dto.SettingsUpdateRequest)
 		Module:    "Setting",
 		Action:    "UPDATE_SETTINGS",
 		Title:     "Pembaruan Profil & Pengaturan Studio",
-		Detail:    fmt.Sprintf("Perusahaan: %s, Tarif PPN Default: %.1f%%", user.Company, user.TaxRate),
+		Detail:    fmt.Sprintf("Perusahaan: %s, Tarif Pajak PPh Default: %.1f%%", user.Company, user.TaxRate),
 		CreatedAt: time.Now(),
 	})
 
